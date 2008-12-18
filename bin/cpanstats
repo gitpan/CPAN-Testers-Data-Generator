@@ -1,0 +1,142 @@
+#!/usr/bin/perl -w
+use strict;
+
+my $VERSION = '0.05';
+
+#----------------------------------------------------------------------------
+# Library Modules
+
+use lib qw(../lib lib);
+
+use Cwd;
+use Getopt::ArgvFile default=>1;
+use Getopt::Long;
+
+use CPAN::Testers::Data::Generator   '0.31';
+
+#----------------------------------------------------------------------------
+# Variables
+
+my %options;
+
+#----------------------------------------------------------------------------
+# Progam
+
+init_options();
+
+my $t = CPAN::Testers::Data::Generator->new(
+    ignore      => $options{ignore},
+    nostore     => $options{nostore},
+    config      => $options{config},
+);
+
+if($options{rebuild})   { $t->rebuild($options{start},$options{end}); }
+else                    { $t->generate; }
+
+
+# -------------------------------------
+# Subroutines
+
+sub init_options {
+    GetOptions( \%options,
+        'config|c=s',
+        'ignore|i',
+        'nostore|n',
+
+        'rebuild|r',
+        'start=i',
+        'end=i',
+
+        'help|h',
+        'version|v'
+    );
+
+    _help(1) if($options{help});
+    _help(0) if($options{version});
+}
+
+sub _help {
+    my $full = shift;
+
+    if($full) {
+        print <<HERE;
+
+Usage: $0 [-c file] [-r [--start=n] [--end=n]] [-i] [-n] [-h] [-v]
+
+  -c file        configuration file
+  -r             rebuild cpanstats from articles
+  --start        start id to rebuild
+  --end          end id to rebuild
+  -i             ignore no article errors
+  -n             do not store old articles
+  -h             this help screen
+  -v             program version
+
+HERE
+
+    }
+
+    print "$0 v$VERSION\n";
+    exit(0);
+}
+
+__END__
+
+=head1 NAME
+
+cpanstats - script to access the NNTP server and update the database.
+
+=head1 SYNOPSIS
+
+  # use defaults
+  cpanstats -c=data/settings.ini
+
+  # rebuild default database
+  cpanstats -c=data/settings.ini --rebuild --start=100 --end=200
+  
+  # update database in named directory, without storing articles,
+  # and ignoring any missing article responses from the NNTP server
+  cpanstats -c=data/settings.ini --nostore --ignore
+
+=head1 DESCRIPTION
+
+Acts as a wrapper script to the underlying CPAN::Testers::Data::Generator code
+that downloads articles from the NNTP server, extracts all components of each,
+then stores the data into a local SQLite database.
+
+=head1 BUGS, PATCHES & FIXES
+
+There are no known bugs at the time of this release. However, if you spot a
+bug or are experiencing difficulties, that is not explained within the POD
+documentation, please send an email to barbie@cpan.org. However, it would help
+greatly if you are able to pinpoint problems or even supply a patch.
+
+Fixes are dependant upon their severity and my availablity. Should a fix not
+be forthcoming, please feel free to (politely) remind me.
+
+RT Queue -
+http://rt.cpan.org/Public/Dist/Display.html?Name=CPAN-Testers-Data-Generator
+
+=head1 SEE ALSO
+
+L<CPAN::WWW::Testers>,
+L<CPAN::Testers::WWW::Statistics>
+
+F<http://www.cpantesters.org/>,
+F<http://stats.cpantesters.org/>,
+F<http://wiki.cpantesters.org/>
+
+=head1 AUTHOR
+
+  Barbie, <barbie@cpan.org>
+  for Miss Barbell Productions <http://www.missbarbell.co.uk>.
+
+=head1 COPYRIGHT AND LICENSE
+
+  Copyright (C) 2005-2008 Barbie for Miss Barbell Productions.
+
+  This module is free software; you can redistribute it and/or
+  modify it under the same terms as Perl itself.
+
+=cut
+
