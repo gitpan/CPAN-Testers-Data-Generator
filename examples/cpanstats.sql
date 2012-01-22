@@ -2,7 +2,7 @@
 
 DROP TABLE IF EXISTS cpanstats;
 CREATE TABLE cpanstats (
-    id          int(10) unsigned NOT NULL,
+    id          int(10) unsigned NOT NULL auto_increment,
     guid        char(36) NOT NULL,
     state       varchar(32),
     postdate    varchar(8),
@@ -62,7 +62,7 @@ CREATE TABLE `uploads` (
   `filename`    varchar(255)    NOT NULL,
   `released`    int(16)         NOT NULL,
   PRIMARY KEY  (`author`,`dist`,`version`)
-) ENGINE=MyISAM;
+);
 
 DROP TABLE IF EXISTS `ixlatest`;
 CREATE TABLE `ixlatest` (
@@ -72,7 +72,7 @@ CREATE TABLE `ixlatest` (
   `author`      varchar(32)     NOT NULL,
   `oncpan`      tinyint(4)      DEFAULT 0,
   PRIMARY KEY  (`dist`)
-) ENGINE=MyISAM;
+);
 
 DROP TABLE IF EXISTS `summary`;
 CREATE TABLE `summary` (
@@ -81,30 +81,52 @@ CREATE TABLE `summary` (
   `lastid`      int(10) unsigned NOT NULL,
   `dataset`     blob,
   PRIMARY KEY  (`type`,`name`)
-) ENGINE=MyISAM;
+);
 
 DROP TABLE IF EXISTS `page_requests`;
 CREATE TABLE `page_requests` (
   `type`        varchar(8)       NOT NULL,
   `name`        varchar(255)     NOT NULL,
-  `weight`      int(2) unsigned  NOT NULL
-) ENGINE=MyISAM;
+  `weight`      int(2) unsigned  NOT NULL,
+  `id`          int(10) unsigned default 0
+);
 
 DROP TABLE IF EXISTS osname;
 CREATE TABLE osname (
-     id         int(10) unsigned NOT NULL auto_increment,
-     osname     varchar(255),
-     ostitle    varchar(255),
-     PRIMARY KEY (id)
+    id          int(10) unsigned NOT NULL auto_increment,
+    osname      varchar(255),
+    ostitle     varchar(255),
+    PRIMARY KEY (id)
+);
+
+DROP TABLE IF EXISTS `perl_version`;
+CREATE TABLE `perl_version` (
+  `version`	varchar(255) default NULL,
+  `perl`	varchar(32) default NULL,
+  `patch`	tinyint(1) default 0,
+  `devel`	tinyint(1) default 0,
+  PRIMARY KEY  (`version`)
 );
 
 
-
-DROP TABLE IF EXISTS fact;
-CREATE TABLE fact (
+DROP TABLE IF EXISTS metabase;
+CREATE TABLE metabase (
     guid        char(36) NOT NULL,
-    type        varchar(36) NOT NULL,
-    meta        blob NOT NULL,
-    content     blob NOT NULL,
-    PRIMARY KEY (guid)
+    id          int(10) unsigned NOT NULL,
+    updated     varchar(32) default NULL,
+    report	    longblob NOT NULL,
+    PRIMARY KEY (guid),
+    INDEX (id),
+    INDEX (updated)
 );
+
+DROP TABLE IF EXISTS `testers_email`;
+CREATE TABLE `testers_email` (
+  `id` int(10) unsigned NOT NULL auto_increment,
+  `resource` varchar(64) NOT NULL,
+  `fullname` varchar(255) NOT NULL,
+  `email` varchar(255) default NULL,
+  PRIMARY KEY  (`id`),
+  KEY `resource` (`resource`)
+);
+

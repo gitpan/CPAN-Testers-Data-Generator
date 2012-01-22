@@ -1,33 +1,51 @@
 #!/usr/bin/perl -w
 use strict;
 
+#----------------------------------------------------------------------------
+# TODO List
+
+# 1. add regenrate tests
+# 2. mock AWS connection and return pre-prepared report data
+
+#----------------------------------------------------------------------------
+# Libraries
+
 use Config::IniFiles;
 use CPAN::Testers::Common::DBUtils;
 use CPAN::Testers::Data::Generator;
+use CPAN::Testers::Metabase::AWS;
 use Data::Dumper;
 use File::Path;
 use IO::File;
+use JSON;
 use Test::More;
-
-#----------------------------------------------------------------------------
-# Test Conditions
-
-eval "use Test::MockObject";
-if($@) {
-    plan skip_all => 'Need Test::MockObject to do full tests';
-}
 
 #----------------------------------------------------------------------------
 # Test Variables
 
-my (%options,$nomock,$mock1);
+my (%options,$meta);
 my $config = './t/test-config.ini';
-my %articles = (
-    1 => 't/nntp/126015.txt',
-    2 => 't/nntp/125106.txt',
-    3 => 't/nntp/1804993.txt',
-    4 => 't/nntp/1805500.txt',
-);
+my $TESTS = 71;
+
+#----------------------------------------------------------------------------
+# Test Conditions
+
+BEGIN {
+    my $meta;
+    eval {
+        $meta = CPAN::Testers::Metabase::AWS->new(
+            bucket      => 'cpantesters',
+            namespace   => 'beta2',
+        );
+    };
+    diag('No AWS key')   unless($meta);
+
+    if($meta) {
+        # check whether tester has a valid access key
+        $meta = undef   unless($meta->access_key_id());
+        diag('No S3 key')   unless($meta);
+    }
+}
 
 #----------------------------------------------------------------------------
 # Test Data
@@ -47,7 +65,8 @@ my @create_sqlite = (
                 perl        TEXT,
                 osname      TEXT,
                 osvers      TEXT,
-                fulldate    TEXT)',
+                fulldate    TEXT,
+                date        TEXT)',
 
             'CREATE INDEX distverstate ON cpanstats (dist, version, state)',
             'CREATE INDEX ixperl ON cpanstats (perl)',
@@ -107,7 +126,8 @@ my @create_sqlite = (
             'CREATE TABLE page_requests (
                 type        TEXT,
                 name        TEXT,
-                weight      INTEGER
+                weight      INTEGER,
+                id          INTEGER
             )',
 
             'CREATE TABLE osname (
@@ -116,7 +136,45 @@ my @create_sqlite = (
                 ostitle     TEXT
             )',
 
-            "INSERT INTO osname VALUES (1,'linux','Linux')"
+            "INSERT INTO osname VALUES (1,'aix','AIX')",
+            "INSERT INTO osname VALUES (2,'bsdos','BSD/OS')",
+            "INSERT INTO osname VALUES (3,'cygwin','Windows(Cygwin)')",
+            "INSERT INTO osname VALUES (4,'darwin','MacOSX')",
+            "INSERT INTO osname VALUES (5,'dec_osf','Tru64')",
+            "INSERT INTO osname VALUES (6,'dragonfly','DragonflyBSD')",
+            "INSERT INTO osname VALUES (7,'freebsd','FreeBSD')",
+            "INSERT INTO osname VALUES (8,'gnu','GNUHurd')",
+            "INSERT INTO osname VALUES (9,'haiku','Haiku')",
+            "INSERT INTO osname VALUES (10,'hpux','HP-UX')",
+            "INSERT INTO osname VALUES (11,'irix','IRIX')",
+            "INSERT INTO osname VALUES (12,'linux','Linux')",
+            "INSERT INTO osname VALUES (13,'macos','MacOSclassic')",
+            "INSERT INTO osname VALUES (14,'midnightbsd','MidnightBSD')",
+            "INSERT INTO osname VALUES (15,'mirbsd','MirOSBSD')",
+            "INSERT INTO osname VALUES (16,'mswin32','Windows(Win32)')",
+            "INSERT INTO osname VALUES (17,'netbsd','NetBSD')",
+            "INSERT INTO osname VALUES (18,'openbsd','OpenBSD')",
+            "INSERT INTO osname VALUES (19,'os2','OS/2')",
+            "INSERT INTO osname VALUES (20,'os390','OS390/zOS')",
+            "INSERT INTO osname VALUES (21,'osf','OSF')",
+            "INSERT INTO osname VALUES (22,'sco','SCO')",
+            "INSERT INTO osname VALUES (24,'vms','VMS')",
+            "INSERT INTO osname VALUES (23,'solaris','SunOS/Solaris')",
+            "INSERT INTO osname VALUES (25,'beos','BeOS')",
+
+            'DROP TABLE IF EXISTS perl_version',
+            'CREATE TABLE perl_version (
+              version	    TEXT    default NULL,
+              perl	        TEXT    default NULL,
+              patch	        INTEGER default 0,
+              devel	        INTEGER default 0,
+              PRIMARY KEY  (version)
+            )',
+
+            "INSERT INTO perl_version VALUES ('5.10.0','5.10.0',0,0)",
+            "INSERT INTO perl_version VALUES ('5.11.0','5.11.0',0,1)",
+            "INSERT INTO perl_version VALUES ('v5.10.0','5.10.0',0,0)",
+            "INSERT INTO perl_version VALUES ('5.12.0 RC1','5.12.0',1,0)"
 );
 
 my @create_mysql = (
@@ -141,7 +199,8 @@ my @create_mysql = (
             'CREATE TABLE page_requests (
                 type        varchar(8)   NOT NULL,
                 name        varchar(255) NOT NULL,
-                weight      int(2) unsigned NOT NULL
+                weight      int(2)  unsigned NOT NULL,
+                id          int(10) unsigned default 0
             )',
 
             'DROP TABLE IF EXISTS release_data',
@@ -205,21 +264,83 @@ my @create_mysql = (
                 PRIMARY KEY (id)
             )',
 
-            "INSERT INTO osname VALUES (1,'linux','Linux')"
+            "INSERT INTO osname VALUES (1,'aix','AIX')",
+            "INSERT INTO osname VALUES (2,'bsdos','BSD/OS')",
+            "INSERT INTO osname VALUES (3,'cygwin','Windows(Cygwin)')",
+            "INSERT INTO osname VALUES (4,'darwin','MacOSX')",
+            "INSERT INTO osname VALUES (5,'dec_osf','Tru64')",
+            "INSERT INTO osname VALUES (6,'dragonfly','DragonflyBSD')",
+            "INSERT INTO osname VALUES (7,'freebsd','FreeBSD')",
+            "INSERT INTO osname VALUES (8,'gnu','GNUHurd')",
+            "INSERT INTO osname VALUES (9,'haiku','Haiku')",
+            "INSERT INTO osname VALUES (10,'hpux','HP-UX')",
+            "INSERT INTO osname VALUES (11,'irix','IRIX')",
+            "INSERT INTO osname VALUES (12,'linux','Linux')",
+            "INSERT INTO osname VALUES (13,'macos','MacOSclassic')",
+            "INSERT INTO osname VALUES (14,'midnightbsd','MidnightBSD')",
+            "INSERT INTO osname VALUES (15,'mirbsd','MirOSBSD')",
+            "INSERT INTO osname VALUES (16,'mswin32','Windows(Win32)')",
+            "INSERT INTO osname VALUES (17,'netbsd','NetBSD')",
+            "INSERT INTO osname VALUES (18,'openbsd','OpenBSD')",
+            "INSERT INTO osname VALUES (19,'os2','OS/2')",
+            "INSERT INTO osname VALUES (20,'os390','OS390/zOS')",
+            "INSERT INTO osname VALUES (21,'osf','OSF')",
+            "INSERT INTO osname VALUES (22,'sco','SCO')",
+            "INSERT INTO osname VALUES (24,'vms','VMS')",
+            "INSERT INTO osname VALUES (23,'solaris','SunOS/Solaris')",
+            "INSERT INTO osname VALUES (25,'beos','BeOS')",
+
+            'DROP TABLE IF EXISTS perl_version',
+            'CREATE TABLE perl_version (
+              version	    varchar(255) default NULL,
+              perl	        varchar(32)  default NULL,
+              patch	        tinyint(1)   default 0,
+              devel	        tinyint(1)   default 0,
+              PRIMARY KEY  (version)
+            )',
+
+            "INSERT INTO perl_version VALUES ('5.10.0','5.10.0',0,0)",
+            "INSERT INTO perl_version VALUES ('5.11.0','5.11.0',0,1)",
+            "INSERT INTO perl_version VALUES ('v5.10.0','5.10.0',0,0)",
+            "INSERT INTO perl_version VALUES ('5.12.0 RC1','5.12.0',1,0)"
 );
 
-my @create_arts_sqlite = (
+my @create_meta_sqlite = (
             'PRAGMA auto_vacuum = 1',
-            'CREATE TABLE articles (
-                id            INTEGER PRIMARY KEY,
-                article       TEXT)'
+            'CREATE TABLE metabase (
+                id          INTEGER PRIMARY KEY,
+                guid        INTEGER,
+                updated     TEXT,
+                report      TEXT)',
+            'CREATE INDEX guid ON metabase (guid)',
+
+            'CREATE TABLE `testers_email` (
+                id          INTEGER PRIMARY KEY,
+                resource    TEXT,
+                fullname    TEXT,
+                email       TEXT
+            )',
+            'CREATE INDEX resource ON testers_email (resource)'
 );
 
-my @create_arts_mysql = (
-            'CREATE TABLE articles (
+my @create_meta_mysql = (
+            'CREATE TABLE metabase (
                 id          int(10) unsigned NOT NULL,
-                article     blob,
-                PRIMARY KEY (id)'
+                guid        char(36) NOT NULL,
+                updated     varchar(32) default NULL,
+                report      longblob NOT NULL,
+                PRIMARY KEY (id),
+                INDEX guid (guid)
+            )',
+
+            'CREATE TABLE `testers_email` (
+              id            int(10) unsigned NOT NULL auto_increment,
+              resource      varchar(64) NOT NULL,
+              fullname      varchar(255) NOT NULL,
+              email         varchar(255) default NULL,
+              PRIMARY KEY  (id),
+              KEY resource (resource)
+            )'
 );
 
 my @delete_sqlite = (
@@ -238,12 +359,28 @@ my @delete_mysql = (
             'DELETE FROM ixlatest'
 );
 
-my @delete_arts_sqlite = (
-            'DELETE FROM articles'
+my @delete_meta_sqlite = (
+            'DELETE FROM metabase'
 );
 
-my @delete_arts_mysql = (
-            'DELETE FROM articles'
+my @delete_meta_mysql = (
+            'DELETE FROM metabase'
+);
+
+my @test_stat_rows = (
+[ '1', '2', 'a58945f6-3510-11df-89c9-1bb9c3681c0d', 'pass', '201003', 'chris@bingosnet.co.uk', 'Sub-Exporter-ForMethods', '0.100050', 'i686-linux-thread-multi-64int', '5.8.8', 'Linux', '2.6.28-11-generic', '201003211739', undef ],
+[ '2', '2', 'ad3189d0-3510-11df-89c9-1bb9c3681c0d', 'pass', '201003', 'chris@bingosnet.co.uk', 'Algorithm-Diff', '1.1902', 'i686-linux-thread-multi-64int', '5.8.8', 'Linux', '2.6.28-11-generic', '201003211739', undef ],
+[ '3', '2', 'af820e12-3510-11df-89c9-1bb9c3681c0d', 'pass', '201003', 'chris@bingosnet.co.uk', 'Text-Diff', '1.37', 'i686-linux-thread-multi-64int', '5.8.8', 'Linux', '2.6.28-11-generic', '201003211739', undef ],
+[ '4', '2', 'b248f71e-3510-11df-89c9-1bb9c3681c0d', 'pass', '201003', 'chris@bingosnet.co.uk', 'Test-Differences', '0.500', 'i686-linux-thread-multi-64int', '5.8.8', 'Linux', '2.6.28-11-generic', '201003211739', undef ],
+[ '5', '2', 'b77e7132-3510-11df-89c9-1bb9c3681c0d', 'pass', '201003', 'chris@bingosnet.co.uk', 'namespace-autoclean', '0.09', 'i686-linux-thread-multi-64int', '5.8.8', 'Linux', '2.6.28-11-generic', '201003211739', undef ]
+);
+
+my @test_meta_rows = (
+[ 1, 'a58945f6-3510-11df-89c9-1bb9c3681c0d', '2010-03-21T17:39:05Z' ],
+[ 2, 'ad3189d0-3510-11df-89c9-1bb9c3681c0d', '2010-03-21T17:39:18Z' ],
+[ 3, 'af820e12-3510-11df-89c9-1bb9c3681c0d', '2010-03-21T17:39:22Z' ],
+[ 4, 'b248f71e-3510-11df-89c9-1bb9c3681c0d', '2010-03-21T17:39:27Z' ],
+[ 5, 'b77e7132-3510-11df-89c9-1bb9c3681c0d', '2010-03-21T17:39:35Z' ]
 );
 
 #----------------------------------------------------------------------------
@@ -257,45 +394,30 @@ mkpath($directory) or die "cannot create directory";
 if(create_db(0)) {
     plan skip_all => 'Cannot create temporary databases';
 } else {
-    plan tests => 50;
+    plan tests => $TESTS;
 }
 
 # continue with testing
-
-BEGIN {
-    eval "use Test::MockObject";
-    $nomock = $@;
-
-    unless($nomock) {
-        $mock1 = Test::MockObject->new();
-        $mock1->fake_module( 'Net::NNTP',
-                    'group' => \&group,
-                    'article' => \&getArticle);
-        $mock1->fake_new( 'Net::NNTP' );
-        $mock1->mock( 'group', \&group );
-        $mock1->mock( 'article', \&getArticle );
-    }
-}
 
 rmtree($directory);
 mkpath($directory);
 
 ok(!-f $directory . '/cpanstats.db', '.. dbs not created yet');
 ok(!-f $directory . '/litestats.db');
-ok(!-f $directory . '/articles.db');
+ok(!-f $directory . '/metabase.db');
 
-is(create_db(0), 0, '.. dbs created');
+is(create_db(0), 0, '.. dbs created [STAGE 1]');
 
-ok(-f $directory . '/cpanstats.db', '.. dbs files found');
+ok(-f $directory . '/cpanstats.db', '.. dbs created');
 ok(-f $directory . '/litestats.db');
-ok(-f $directory . '/articles.db');
+ok(-f $directory . '/metabase.db');
 
 is(create_db(2), 0, '.. dbs prepped');
 
 ## Test we can generate
 
 SKIP: {
-    skip "Test::MockObject required for testing", 7 if $nomock;
+    skip "Valid S3 access key required for live tests", 7 unless $meta;
     #diag "Testing generate()";
 
     my $t = CPAN::Testers::Data::Generator->new(
@@ -315,24 +437,44 @@ SKIP: {
     # interrogate the contents at a later date :)
     ok(-f $directory . '/cpanstats.db','.. dbs still there');
     ok(-f $directory . '/cpanstats.log');
-    ok(-f $directory . '/articles.db');
+    ok(-f $directory . '/metabase.db');
 
-    my $size = -s $directory . '/articles.db';
+    my $size = -s $directory . '/metabase.db';
 
     # second update should do nothing
     $t->generate;
 
-    is(-s $directory . '/articles.db', $size,'.. db should not change size');
+    is(-s $directory . '/metabase.db', $size,'.. db should not change size');
 
-    is(countRequests(),2,'.. page requests added');
-    is(countReleases(),2,'.. release data entries added');
+    is(countRequests(),1,'.. page requests added');
+    is(countReleases(),1,'.. release data entries added');
 }
+
+# refresh the databases
+
+rmtree($directory);
+mkpath($directory);
+
+ok(!-f $directory . '/cpanstats.db', '.. dbs not created yet');
+ok(!-f $directory . '/litestats.db');
+ok(!-f $directory . '/metabase.db');
+
+is(create_db(0), 0, '.. dbs created [STAGE 2]');
+
+ok(-f $directory . '/cpanstats.db', '.. dbs created');
+ok(-f $directory . '/litestats.db');
+ok(-f $directory . '/metabase.db');
+
+is(create_db(2), 0, '.. dbs prepped');
+
+# build test metabase
+
+is(create_metabase(0), 0, '.. metabase created');
 
 ## Test we can rebuild
 
 SKIP: {
-    skip "Test::MockObject required for testing", 9 if $nomock;
-    #diag "Testing rebuild()";
+    skip "Valid S3 access key required for live tests", 7 unless $meta;
 
     my $t = CPAN::Testers::Data::Generator->new(
         config  => $config,
@@ -340,14 +482,13 @@ SKIP: {
     );
 
     # everything should still be there
-    ok(-f $directory . '/cpanstats.db','.. dbs still there');
-    ok(-f $directory . '/cpanstats.log');
-    ok(-f $directory . '/articles.db');
+    ok(-f $directory . '/cpanstats.db','.. dbs still there [STAGE 3]');
+    ok(-f $directory . '/metabase.db');
 
     my $size = -s $directory . '/cpanstats.db';
 
-    # delete stats database records
-    create_db(1);
+    # remove stats database entries
+    #create_db(1);
 
     # recreate the stats database
     $t->rebuild;
@@ -357,19 +498,80 @@ SKIP: {
     is(-s $directory . '/cpanstats.db', $size,'.. db should be same size');
 
     # recreate the stats database for specific entries
-    $t->rebuild(1,4);
+    $t->rebuild({gstart => 1, gend => 4});
 
     # check stats database is again the same size as before
     ok(-f $directory . '/cpanstats.db');
     is(-s $directory . '/cpanstats.db', $size,'.. db should be same size');
+    ok(-f $directory . '/cpanstats.log');
 }
 
+# FROM HERE WE DON'T NEED THE INTERNET
+
+# TEST INTERNALS
+
+SKIP: {
+    skip "Valid S3 access key required for live tests", 22 unless $meta;
+
+    testCpanstatsRecords();
+    testMetabaseRecords();
+
+    my $c1 = getMetabaseCount();
+    is($c1,5,'Internal Tests, metabase contains 5 reports');
+
+    my $t = CPAN::Testers::Data::Generator->new(
+        config  => $config,
+        logfile => $directory . '/cpanstats.log'
+    );
+
+    my @test_dates = (
+        [ undef, '', '' ],
+        [ undef, 'xxx', '' ],
+        [ undef, '', 'xxx' ],
+        [ '2000-01-01T00:00:00Z', '', '2000-01-01T00:00:00Z' ],
+        [ '2010-09-13T03:20:00Z', undef, '2010-09-13T03:20:00Z' ],
+        [ '2010-03-21T17:39:05Z', 'a58945f6-3510-11df-89c9-1bb9c3681c0d', '' ],
+    );
+
+    for my $test (@test_dates) {
+        is($t->_get_createdate($test->[1],$test->[2]),$test->[0], ".. test date [".($test->[0]||'undef')."]"); 
+    }
+
+    is($t->already_saved('a58945f7-3510-11df-89c9-1bb9c3681c0d'),0,'.. missing metabase guid');
+    is($t->already_saved('a58945f6-3510-11df-89c9-1bb9c3681c0d'),1,'.. found metabase guid');
+
+    is($t->retrieve_report('a58945f7-3510-11df-89c9-1bb9c3681c0d'),undef,'.. missing cpanstats guid');
+    my $r = $t->retrieve_report('a58945f6-3510-11df-89c9-1bb9c3681c0d');
+    is($r->{guid},'a58945f6-3510-11df-89c9-1bb9c3681c0d','.. found cpanstats guid');
+
+    $options{CPANSTATS} ||= config_db('CPANSTATS');
+    my @rows = $options{CPANSTATS}->{dbh}->get_query('array','SELECT count(id) FROM osname');
+    is($rows[0]->[0],25,'.. all OS names');
+
+    is($t->_platform_to_osname('linux'),'linux',        '.. known OS');
+    is($t->_platform_to_osname('linuxThis'),'linux',    '.. known mispelling');
+    is($t->_platform_to_osname('unknown'),'',           '.. unknown OS');
+
+    is($t->_osname('LINUX'),'Linux',                    '.. known OS fixed case');
+    is($t->_osname('Unknown'),'UNKNOWN',                '.. save unknown OS');
+    is($t->_platform_to_osname('unknown'),'unknown',    '.. unknown is now known OS');
+
+    my $json;
+    my $fh = IO::File->new("t/data/ad3189d0-3510-11df-89c9-1bb9c3681c0d.json") or die diag("$!");
+    while(<$fh>) { $json .= $_ }
+    $fh->close;
+
+    my $text = decode_json($json);
+    $t->{report}{metabase} = $text;
+    $t->_check_arch_os();
+    is($t->{report}{osname},'linux','.. set OS');
+    is($t->{report}{platform},'i686-linux-thread-multi-64int','.. set platform');
+}
 
 ## Test we can reparse
 
 SKIP: {
-    skip "Test::MockObject required for testing", 7 if $nomock;
-    #diag "Testing reparse()";
+    skip "Valid S3 access key required for live tests", 5 unless $meta;
 
     my $t = CPAN::Testers::Data::Generator->new(
         config  => $config,
@@ -377,108 +579,80 @@ SKIP: {
     );
 
     # everything should still be there
-    ok(-f $directory . '/cpanstats.db','.. dbs still there');
+    ok(-f $directory . '/cpanstats.db','.. dbs still there [STAGE 4]');
     ok(-f $directory . '/cpanstats.log');
-    ok(-f $directory . '/articles.db');
+    ok(-f $directory . '/metabase.db');
 
     my $size = -s $directory . '/cpanstats.db';
 
     # recreate the stats database
-    $t->reparse({localonly => 1},1);
-
-    # check stats database is again the same size as before
-    ok(-f $directory . '/cpanstats.db');
-    is(-s $directory . '/cpanstats.db', $size,'.. db should be same size');
-
-    # recreate the stats database for specific entries
-    $t->reparse({},4);
+    $t->reparse({localonly => 1},1,4);
 
     # check stats database is again the same size as before
     ok(-f $directory . '/cpanstats.db');
     is(-s $directory . '/cpanstats.db', $size,'.. db should be same size');
 }
 
-
 ## Test we don't reparse anything that doesn't already exist
 
 SKIP: {
-    skip "Test::MockObject required for testing", 10 if $nomock;
-    #diag "Testing reparse()";
+    skip "Valid S3 access key required for live tests", 7 unless $meta;
 
+    # everything should still be there
+    ok(-f $directory . '/cpanstats.db','.. dbs still there [STAGE 5]');
+    ok(-f $directory . '/cpanstats.log');
+    ok(-f $directory . '/metabase.db');
+
+    my $size = -s $directory . '/cpanstats.db';
+
+    my $c1 = getMetabaseCount();
+    deleteMetabase(1);
+    my $c2 = getMetabaseCount();
+    is($c1-1,$c2,'... removed 1 article');
+
+    # recreate the stats database locally
     my $t = CPAN::Testers::Data::Generator->new(
         config  => $config,
         logfile => $directory . '/cpanstats.log'
     );
 
-    # everything should still be there
-    ok(-f $directory . '/cpanstats.db','.. dbs still there');
-    ok(-f $directory . '/cpanstats.log');
-    ok(-f $directory . '/articles.db');
-
-    my $size = -s $directory . '/cpanstats.db';
-
-    my $c1 = getArticleCount();
-    deleteArticle(1);
-    my $c2 = getArticleCount();
-    is($c1-1,$c2,'... removed 1 article');
-
-    # recreate the stats database locally
     $t->reparse({localonly => 1},1,2);
-    my $c3 = getArticleCount();
-    is($c2,$c3,'... no more or less articles');
-
-    # check stats database is again the same size as before
-    ok(-f $directory . '/cpanstats.db');
-    is(-s $directory . '/cpanstats.db', $size,'.. db should be same size');
-
-    # recreate the stats database for specific entries
-    $t->reparse({},0,6,20,100);
-    my $c4 = getArticleCount();
-    is($c2,$c4,'... no more or less articles again');
+    my $c3 = getMetabaseCount();
+    is($c2,$c3,'... no more or less reports');
 
     # check stats database is again the same size as before
     ok(-f $directory . '/cpanstats.db');
     is(-s $directory . '/cpanstats.db', $size,'.. db should be same size');
 }
 
-
-## Test we don't store articles
+## Test we can regenerate anything that doesn't already exist
 
 SKIP: {
-    skip "Test::MockObject required for testing", 10 if $nomock;
-    #diag "Testing nostore()";
-
-    # set to not store articles
-    my $t = CPAN::Testers::Data::Generator->new(
-        config  => $config,
-        logfile => $directory . '/cpanstats.log',
-	    nostore     => 1,
-	    ignore      => 1
-    );
+    skip "Valid S3 access key required for live tests", 6 unless $meta;
 
     # everything should still be there
-    ok(-f $directory . '/cpanstats.db','.. dbs still there');
+    ok(-f $directory . '/cpanstats.db','.. dbs still there [STAGE 6]');
     ok(-f $directory . '/cpanstats.log');
-    ok(-f $directory . '/articles.db');
+    ok(-f $directory . '/metabase.db');
 
-    my $size = -s $directory . '/articles.db';
-    my $count = getArticleCount();
-    is($count,2,'.. should be 2 records');
+    my $size = -s $directory . '/cpanstats.db';
 
-    # update should just reduce articles database
-    $t->generate;
+    my $c1 = getMetabaseCount();
 
-    # check everything is still there
-    ok(-f $directory . '/cpanstats.db','.. dbs still there');
-    ok(-f $directory . '/cpanstats.log');
-    ok(-f $directory . '/articles.db');
+    # recreate the stats database locally
+    my $t = CPAN::Testers::Data::Generator->new(
+        config  => $config,
+        logfile => $directory . '/cpanstats.log'
+    );
 
-    my $msize = -s $directory . '/articles.db';
-    my $mcount = getArticleCount();
+    $t->regenerate({dstart => '2000-01-01T00:00:00Z', dend => '2010-09-01T00:00:00Z'});
 
-    cmp_ok($msize, '<=', $size,'.. db should be a smaller size');
-    cmp_ok($mcount, '<=', $count,'.. db should have fewer records');
-    is($mcount,1,'.. should be 1 record');
+    my $c2 = getMetabaseCount();
+    is($c1,$c2,'... no more or less reports');
+
+    # check stats database is again the same size as before
+    ok(-f $directory . '/cpanstats.db');
+    is(-s $directory . '/cpanstats.db', $size,'.. db should be same size');
 }
 
 
@@ -523,7 +697,7 @@ sub create_db {
     if($type == 0) {
         $options{CPANSTATS} = config_db('CPANSTATS')    or return 1;
         $options{LITESTATS} = config_db('LITESTATS')    or return 1;
-        $options{LITEARTS}  = config_db('LITEARTS')     or return 1;
+        $options{METABASE}  = config_db('METABASE')     or return 1;
 
         if($options{CPANSTATS}->{opts}{driver} =~ /sqlite/i)    { create_file('CPANSTATS')                  and return 1;
                                                                   dosql('CPANSTATS',\@create_sqlite)        and return 1; }
@@ -531,9 +705,9 @@ sub create_db {
         if($options{LITESTATS}->{opts}{driver} =~ /sqlite/i)    { create_file('LITESTATS')                  and return 1;
                                                                   dosql('LITESTATS',\@create_sqlite)        and return 1; }
         else                                                    { dosql('LITESTATS',\@create_mysql)         and return 1; }
-        if($options{LITEARTS}->{opts}{driver} =~ /sqlite/i)     { create_file('LITEARTS')                   and return 1;
-                                                                  dosql('LITEARTS', \@create_arts_sqlite)   and return 1; }
-        else                                                    { dosql('LITEARTS', \@create_arts_mysql)    and return 1; }
+        if($options{METABASE}->{opts}{driver} =~ /sqlite/i)     { create_file('METABASE')                   and return 1;
+                                                                  dosql('METABASE', \@create_meta_sqlite)   and return 1; }
+        else                                                    { dosql('METABASE', \@create_meta_mysql)    and return 1; }
     }
     
     if($type < 3) {
@@ -544,8 +718,8 @@ sub create_db {
     }
 
     if($type > 1) {
-        if($options{LITEARTS}->{opts}{driver} =~ /sqlite/i)     { dosql('LITEARTS', \@delete_arts_sqlite)   and return 1; }
-        else                                                    { dosql('LITEARTS', \@delete_arts_mysql)    and return 1; }
+        if($options{METABASE}->{opts}{driver} =~ /sqlite/i)     { dosql('METABASE', \@delete_meta_sqlite)   and return 1; }
+        else                                                    { dosql('METABASE', \@delete_meta_mysql)    and return 1; }
     }
 
     return 0;
@@ -566,6 +740,11 @@ sub dosql {
         eval { $options{$db}->{dbh}->do_query($_); };
         if($@) {
             diag $@;
+            for my $i (1..5) {
+                my @calls = caller($i);
+                last    unless(@calls);
+                diag " => CALLER($calls[1],$calls[2])";
+            }
             return 1;
         }
     }
@@ -573,35 +752,60 @@ sub dosql {
     return 0;
 }
 
-sub group {
-    return(4,1,4);
-}
+sub create_metabase {
+    my @guids = map {s!.*/(.*?).json$!$1!; $_} glob('t/data/*.json');
+    #diag "create_metabase: guids=@guids";
 
-sub getArticle {
-    my ($self,$id) = @_;
-    my @text;
+    my $id = 1;
+    for my $guid (@guids) {
+        #diag "create_metabase: guid=$guid";
 
-    my $fh = IO::File->new($articles{$id}) or return \@text;
-    while(<$fh>) { push @text, $_ }
+        my $json;
+        my $fh = IO::File->new("t/data/$guid.json") or return 1;
+        while(<$fh>) { $json .= $_ }
+        $fh->close;
+
+        my $text = decode_json($json);
+        my $date = $text->{'CPAN::Testers::Fact::TestSummary'}{metadata}{core}{update_time};
+
+        $options{'METABASE'}->{dbh}->do_query('INSERT INTO metabase (id,guid,updated,report) VALUES (?,?,?,?)',$id++,$guid,$date,$json);
+    }
+
+    my $fh = IO::File->new("t/data/testers.csv") or return 1;
+    while(<$fh>) {
+        s/\s*$//;
+        my @fields = split(',',$_);
+        $options{'METABASE'}->{dbh}->do_query('INSERT INTO testers_email (id,resource,fullname,email) VALUES (?,?,?,?)',@fields);
+    }
     $fh->close;
 
-    return \@text;
+    return 0;
 }
 
-sub getArticleCount {
-    $options{LITEARTS} ||= config_db('LITEARTS');
+sub testCpanstatsRecords {
+    $options{CPANSTATS} ||= config_db('CPANSTATS');
+    my @rows = $options{CPANSTATS}->{dbh}->get_query('array','SELECT * FROM cpanstats');
+    is_deeply(\@rows,\@test_stat_rows,'.. test cpanstats rows');
+}
 
-    my @rows = $options{LITEARTS}->{dbh}->get_query('array','SELECT count(id) FROM articles');
+sub testMetabaseRecords {
+    $options{METABASE} ||= config_db('METABASE');
+    my @rows = $options{METABASE}->{dbh}->get_query('array','SELECT id,guid,updated FROM metabase');
+    is_deeply(\@rows,\@test_meta_rows,'.. test metabase rows');
+}
+
+sub getMetabaseCount {
+    $options{METABASE} ||= config_db('METABASE');
+    my @rows = $options{METABASE}->{dbh}->get_query('array','SELECT count(id) FROM metabase');
     return 0	unless(@rows);
     return $rows[0]->[0] || 0;
 }
 
-sub deleteArticle {
+sub deleteMetabase {
     my $id = shift;
-
-    $options{LITEARTS} ||= config_db('LITEARTS');
-    my @rows = $options{LITEARTS}->{dbh}->get_query('array','SELECT * FROM articles WHERE id = ?',$id);
-    $options{LITEARTS}->{dbh}->do_query('DELETE FROM articles WHERE id = ?',$id)    if(@rows);
+    $options{METABASE} ||= config_db('METABASE');
+    my @rows = $options{METABASE}->{dbh}->get_query('array','SELECT * FROM metabase WHERE id = ?',$id);
+    $options{METABASE}->{dbh}->do_query('DELETE FROM metabase WHERE id = ?',$id)    if(@rows);
 }
 
 sub countRequests {
