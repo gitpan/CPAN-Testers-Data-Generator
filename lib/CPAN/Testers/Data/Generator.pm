@@ -4,7 +4,7 @@ use warnings;
 use strict;
 
 use vars qw($VERSION);
-$VERSION = '1.01';
+$VERSION = '1.02';
 
 #----------------------------------------------------------------------------
 # Library Modules
@@ -12,6 +12,7 @@ $VERSION = '1.01';
 use Config::IniFiles;
 use CPAN::Testers::Common::Article;
 use CPAN::Testers::Common::DBUtils;
+use Data::Dumper;
 use File::Basename;
 use File::Path;
 use File::Slurp;
@@ -56,27 +57,7 @@ my @admins = (
     #'david@dagolden.com'
 );
 
-my $OSNAMES;
-my %OSNAMES = (
-    'MacPPC'    => 'macos',
-    'osf'       => 'dec_osf',
-    'pa-risc'   => 'hpux',
-    's390'      => 'os390',
-    'VMS_'      => 'vms',
-    'ARCHREV_0' => 'hpux',
-    'linuxThis' => 'linux',
-    'linThis'   => 'linux',
-    'linuThis'  => 'linux',
-    'lThis'     => 'linux',
-    'xen-amd64' => 'linux',
-    'openThis'  => 'openbsd',
-);
-
-my %mappings = (
-    'WWW-Tumblr'                        => ['WWW-Tumblr','0'],
-    'Text-Phonetic-MatchRatingCodex-1'  => ['Text-Phonetic-MatchRatingCodex','1-0'],
-    'BitArray1'                         => ['BitArray','1-0'],
-);
+my ($OSNAMES,%MAPPINGS);
 
 #----------------------------------------------------------------------------
 # The Application Programming Interface
@@ -126,20 +107,36 @@ sub new {
     }
 
     # build OS names map
-    @rows = $self->{CPANSTATS}->get_query('array','SELECT osname,ostitle FROM osname');
+    @rows = $self->{CPANSTATS}->get_query('array','SELECT osname FROM osname');
     for my $row (@rows) {
-        $self->{OSNAMES}{lc $row->[0]} ||= $row->[1];
+        $self->{OSNAMES}{lc $row->[0]} ||= lc $row->[0];
     }
     $OSNAMES = join('|',keys %{$self->{OSNAMES}})   if(keys %{$self->{OSNAMES}});
+
+    $self->load_uploads();
+    $self->load_authors();
+    $self->load_perl_versions();
 
     if($cfg->SectionExists('DISABLE')) {
         my @values = $cfg->val('DISABLE','LIST');
         $self->{DISABLE}{$_} = 1    for(@values);
     }
 
+    if($cfg->SectionExists('OSNAMES')) {
+        for my $param ($cfg->Parameters('OSNAMES')) {
+            $self->{OSNAMES}{lc $param} ||= lc $cfg->val('OSNAMES',$param);
+        }
+    }
+
+    if($cfg->SectionExists('MAPPINGS')) {
+        for my $param ($cfg->Parameters('MAPPINGS')) {
+            $MAPPINGS{$param} = [ split(',', $cfg->val('MAPPINGS',$param), 2) ];
+        }
+    }
+
     $self->{metabase} = CPAN::Testers::Metabase::AWS->new(
         bucket      => 'cpantesters',
-        namespace   => 'beta2',
+        namespace   => 'beta3',
     );
     $self->{librarian} = $self->{metabase}->public_librarian;
 
@@ -148,6 +145,8 @@ sub new {
 
 sub DESTROY {
     my $self = shift;
+
+    $self->save_perl_versions();
 }
 
 #----------------------------------------------------------------------------
@@ -160,7 +159,7 @@ sub generate {
 
     $self->{reparse} = 0;
 
-    if($self->{json_file}) {
+    if($self->{json_file} && -f $self->{json_file}) {
         my $json = read_file($self->{json_file});
         $self->{reports} = decode_json($json);
     }
@@ -178,6 +177,9 @@ $self->_log("START GENERATE nonstop=$nonstop\n");
 
         $nonstop = 0	if($self->{processed} == 0);
         $nonstop = 0	if($self->{stopfile} && -f $self->{stopfile});
+
+        $self->load_uploads()	if($nonstop);
+        $self->load_authors()	if($nonstop);
 
 $self->_log("CHECK nonstop=$nonstop\n");
     } while($nonstop);
@@ -235,15 +237,8 @@ $self->_log("start=$start, end=$end\n");
         ($self->{processed},$self->{stored},$self->{cached}) = (0,0,0);
 
         # what guids do we already have?
-        my @where;
-        push @where, "updated >= '$data->{dstart}'";
-        push @where, "updated <= '$data->{dend}'";
-        
-        my $sql =   'SELECT guid FROM metabase' . 
-                    (@where ? ' WHERE ' . join(' AND ',@where) : '') .
-                    ' ORDER BY updated asc';
-
-        my @guids = $self->{METABASE}->get_query('hash',$sql);
+        my $sql =   'SELECT guid FROM metabase WHERE updated >= ? AND updated <= ? ORDER BY updated asc';
+        my @guids = $self->{METABASE}->get_query('hash',$sql,$data->{dstart},$data->{dend});
         my %guids = map {$_->{guid} => 1} @guids;
 
         while($start le $end) {
@@ -298,7 +293,10 @@ sub rebuild {
 
     my $start = localtime(time);
     ($self->{processed},$self->{stored},$self->{cached}) = (0,0,0);
-    $self->{reparse} = 1;
+
+    $self->{reparse}   = 1;
+    $self->{localonly} = $hash->{localonly} ? 1 : 0;
+    $self->{check}     = $hash->{check}     ? 1 : 0;
 
 $self->_log("START REBUILD\n");
 
@@ -363,36 +361,59 @@ $self->_log("STOP REBUILD\n");
 }
 
 sub reparse {
-    my ($self,$hash,@guids) = @_;
+    my ($self,$hash) = @_;
 $self->_log("START REPARSE\n");
+
+    my @guids = $self->_get_guid_list($hash->{guid},$hash->{file});
     return  unless(@guids);
 
-    $self->{reparse} = 1;
+    $self->{reparse}   = $self->{force}     ? 0 : 1;
+    $self->{localonly} = $hash->{localonly} ? 1 : 0;
+    $self->{check}     = $hash->{check}     ? 1 : 0;
 
     for my $guid (@guids) {
-        if(my $report = $self->get_fact($guid)) {
+        my $report;
+        $report = $self->load_fact($guid)    unless($hash->{force});
+
+        if($report) {
+            $self->{report}{metabase} = decode_json($report);
+            $self->{report}{guid} = $guid;
+            $hash->{report} = $report;
+            if($self->reparse_report(%$hash)) {	# true if invalid report
+                $self->_log(".. cannot parse report [$guid]\n");
+                return 0;
+            }
+        } else {
+            $report = $self->get_fact($guid)    unless($report || $hash->{localonly});
+
+            unless($report) {
+                if($self->{localonly}) {
+                    $self->_log(".. report not available locally [$guid]\n");
+                    return 0;
+                }
+                $self->_log(".. report not found [$guid]\n");
+                return 0;
+            }
+            
             $self->{report}{guid} = $guid;
             $hash->{report} = $report;
             if($self->parse_report(%$hash)) {	# true if invalid report
-		        $self->_log(".. cannot parse report [$guid]\n");
-		        return 0;
-		    }
+                $self->_log(".. cannot parse report [$guid]\n");
+                return 0;
+            }
+        }
 
-		    if($self->store_report()) { $self->_log(".. stored"); }
-		    else                      {
-		        if($self->{time} gt $self->{report}{updated}) {
-		            $self->_log(".. FAIL: older than requested [$self->{time}]\n");
-		            return 0;
-                }
+	    if($self->store_report()) { $self->_log(".. stored"); }
+	    else                      {
+	        if($self->{time} gt $self->{report}{updated}) {
+	            $self->_log(".. FAIL: older than requested [$self->{time}]\n");
+	            return 0;
+            }
             
-            	$self->_log(".. already stored");
-        	}
-        	if($self->cache_report()) { $self->_log(".. cached\n"); }
-        	else                      { $self->_log(".. FAIL: bad cache data\n"); }
-    	} else {
-        	$self->_log(".. FAIL\n");
-        	return 0;
-    	}
+           	$self->_log(".. already stored");
+       	}
+       	if($self->cache_report()) { $self->_log(".. cached\n"); }
+       	else                      { $self->_log(".. FAIL: bad cache data\n"); }
 	}
 
     $self->commit();
@@ -460,13 +481,15 @@ sub retrieve_reports {
         for my $guid (@$guids) {
             $self->_log("GUID [$guid]");
             $self->{processed}++;
+            $self->{msg} = '';
 
             if(my $report = $self->get_fact($guid)) {
                 $self->{report}{guid}   = $guid;
                 next    if($self->parse_report(report => $report)); # true if invalid report
 
                 if($self->store_report()) { 
-                    $self->_log(".. stored"); $self->{stored}++; 
+                    $self->{msg} .= ".. stored";
+                    $self->{stored}++; 
                     unshift @reports, $report;
                     $count++;
 
@@ -475,7 +498,7 @@ sub retrieve_reports {
                         $self->_log(".. FAIL: older than requested [$self->{time}]\n");
                         next;
                     }
-                    $self->_log(".. already stored");
+                    $self->{msg} .= ".. already stored";
                 }
                 if($self->cache_report()) { $self->_log(".. cached\n"); $self->{cached}++; }
                 else                      { $self->_log(".. bad cache data\n"); }
@@ -485,7 +508,7 @@ sub retrieve_reports {
 
             if($limit && $count % $limit == 0) {
                 splice(@reports,0,$self->{rss_limit})   if(scalar(@reports) > $self->{rss_limit});
-                overwrite_file( $self->{rss_file}, $self->make_rss( \@reports ) )      if($self->{rss_file});
+                #overwrite_file( $self->{rss_file}, $self->_make_rss( \@reports ) )      if($self->{rss_file});
             }
         }
     }
@@ -493,8 +516,8 @@ sub retrieve_reports {
     # store recent files
     if($limit){
         splice(@reports,0,$self->{rss_limit})   if(scalar(@reports) > $self->{rss_limit});
-        overwrite_file( $self->{json_file}, $self->make_json( \@reports ) )    if($self->{json_file});
-        overwrite_file( $self->{rss_file}, $self->make_rss( \@reports ) )      if($self->{rss_file});
+        #overwrite_file( $self->{json_file}, $self->_make_json( \@reports ) )    if($self->{json_file});
+        #overwrite_file( $self->{rss_file},  $self->_make_rss(  \@reports ) )    if($self->{rss_file});
     }
 
     $self->commit();
@@ -511,6 +534,15 @@ sub already_saved {
     my @rows = $self->{METABASE}->get_query('array','SELECT id FROM metabase WHERE guid=?',$guid);
     return 1	if(@rows);
     return 0;
+}
+
+sub load_fact {
+    my ($self,$guid) = @_;
+    my @rows = $self->{METABASE}->get_query('array','SELECT report FROM metabase WHERE guid=?',$guid);
+    return $rows[0]->[0] if(@rows);
+
+    $self->_log(" ... no report [guid=$guid]\n");
+    return;
 }
 
 sub get_fact {
@@ -552,9 +584,9 @@ sub parse_report {
             $self->{report}{version}    = $dist->metadata->{dist_version};
 
             # some distros are a pain!
-	    	if($self->{report}{version} eq '' && $mappings{$self->{report}{dist}}) {
-                $self->{report}{version}    = $mappings{$self->{report}{dist}}->[1];
-                $self->{report}{dist}       = $mappings{$self->{report}{dist}}->[0];
+	    	if($self->{report}{version} eq '' && $MAPPINGS{$self->{report}{dist}}) {
+                $self->{report}{version}    = $MAPPINGS{$self->{report}{dist}}->[1];
+                $self->{report}{dist}       = $MAPPINGS{$self->{report}{dist}}->[0];
             } elsif($self->{report}{version} eq '') {
                 $self->{report}{version}    = 0;
             }
@@ -595,7 +627,7 @@ sub parse_report {
         $self->{report}{fulldate}   = sprintf "%04d%02d%02d%02d%02d", $created[5]+1900, $created[4]+1, $created[3], $created[2], $created[1];
     }
 
-$self->_log(".. time [$self->{report}{created}][$self->{report}{updated}]");
+$self->{msg} .= ".. time [$self->{report}{created}][$self->{report}{updated}]";
 
     $self->{report}{type}       = 2;
     if($self->{DISABLE} && $self->{DISABLE}{$self->{report}{from}}) {
@@ -692,12 +724,15 @@ sub store_report {
         },
         'INSERT' => {
             CPANSTATS => 'INSERT INTO cpanstats (guid,state,postdate,tester,dist,version,platform,perl,osname,osvers,fulldate,type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
-            LITESTATS => 'INSERT INTO cpanstats (id,guid,state,postdate,tester,dist,version,platform,perl,osname,osvers,date,type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+            LITESTATS => 'INSERT INTO cpanstats (id,guid,state,postdate,tester,dist,version,platform,perl,osname,osvers,fulldate,type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
             RELEASE   => 'INSERT INTO release_data (id,guid,dist,version,oncpan,distmat,perlmat,patched,pass,fail,na,unknown) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+        },
+        'REPLACE' => {
+            LITESTATS => 'REPLACE INTO cpanstats (id,guid,state,postdate,tester,dist,version,platform,perl,osname,osvers,fulldate,type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
         },
         'UPDATE' => {
             CPANSTATS => 'UPDATE cpanstats SET state=?,postdate=?,tester=?,dist=?,version=?,platform=?,perl=?,osname=?,osvers=?,fulldate=?,type=? WHERE guid=?',
-            LITESTATS => 'UPDATE cpanstats SET state=?,postdate=?,tester=?,dist=?,version=?,platform=?,perl=?,osname=?,osvers=?,date=?,type=? WHERE guid=?',
+            LITESTATS => 'UPDATE cpanstats SET state=?,postdate=?,tester=?,dist=?,version=?,platform=?,perl=?,osname=?,osvers=?,fulldate=?,type=? WHERE guid=?',
             RELEASE   => 'UPDATE release_data SET id=?,dist=?,version=?,oncpan=?,distmat=?,perlmat=?,patched=?,pass=?,fail=?,na=?,unknown=? WHERE guid=?',
         },
     );
@@ -707,33 +742,41 @@ sub store_report {
     if(@rows) {
         if($self->{reparse}) {
             my ($guid,@update) = @values;
-            $self->{CPANSTATS}->do_query($SQL{UPDATE}{CPANSTATS},@update,$guid);
+            if($self->{check}) {
+                $self->_log( "CHECK: $SQL{UPDATE}{CPANSTATS},[" . join(',',@update,$guid) . "]\n" );
+            } else {
+                $self->{CPANSTATS}->do_query($SQL{UPDATE}{CPANSTATS},@update,$guid);
+            }
         } else {
             $self->{report}{id} = $rows[0]->[0];
             return 0;
         }
     } else {
-        $self->{report}{id} = $self->{CPANSTATS}->id_query($SQL{INSERT}{CPANSTATS},@values);
+        if($self->{check}) {
+            $self->_log( "CHECK: $SQL{INSERT}{CPANSTATS},[" . join(',',@values) . "]\n" );
+        } else {
+            $self->{report}{id} = $self->{CPANSTATS}->id_query($SQL{INSERT}{CPANSTATS},@values);
+        }
     }
+
+    # in check mode, assume the rest happens
+    return 1 if($self->{check});
 
     # update the sqlite database
-    @rows = $self->{LITESTATS}->get_query('array',$SQL{SELECT}{LITESTATS},$values[0]);
-    if(@rows) {
-        if($self->{reparse}) {
-            my ($guid,@update) = @values;
-            $self->{LITESTATS}->do_query($SQL{UPDATE}{LITESTATS},@update,$guid);
-        }
-    } else {
-        $self->{LITESTATS}->do_query($SQL{INSERT}{LITESTATS},$self->{report}{id},@values);
-    }
+    $self->{LITESTATS}->do_query($SQL{REPLACE}{LITESTATS},$self->{report}{id},@values);
 
-    # update perl version table
-    my $patch  = $fields{perl} =~ /^5.(7|9|[1-9][13579])/   ? 1 : 0,    # odd numbers now mark development releases
-    my $devel  = $fields{perl} =~ /(RC\d+|patch)/           ? 1 : 0,
-    my ($perl) = $fields{perl} =~ /(5\.\d+(?:\.\d+)?)/;
-    unless($self->{CPANSTATS}->get_query('array',"SELECT * FROM perl_version WHERE version=?",$fields{perl})) {
-        $self->{CPANSTATS}->do_query("INSERT INTO perl_version (version,perl,patch,devel) VALUES (?,?,?,?)",$fields{perl},$perl,$patch,$devel);
-    }
+#    @rows = $self->{LITESTATS}->get_query('array',$SQL{SELECT}{LITESTATS},$values[0]);
+#    if(@rows) {
+#        if($self->{reparse}) {
+#            my ($guid,@update) = @values;
+#            $self->{LITESTATS}->do_query($SQL{UPDATE}{LITESTATS},@update,$guid);
+#        }
+#    } else {
+#        $self->{LITESTATS}->do_query($SQL{INSERT}{LITESTATS},$self->{report}{id},@values);
+#    }
+
+    # perl version components
+    my ($perl,$patch,$devel) = $self->_get_perl_version($fields{perl});
 
     # only valid reports
     if($self->{report}{type} == 2) {
@@ -742,8 +785,8 @@ sub store_report {
         # push page requests
         # - note we only update the author if this is the *latest* version of the distribution
         my $author = $self->{report}{pauseid} || $self->_get_author($fields{dist},$fields{version});
-        $self->{CPANSTATS}->do_query("INSERT INTO page_requests (type,name,weight,id) VALUES ('author',?,1,?)",$author,$fields[0])  if($author);
-        $self->{CPANSTATS}->do_query("INSERT INTO page_requests (type,name,weight,id) VALUES ('distro',?,1,?)",$fields[5],$fields[0]);
+        $self->{CPANSTATS}->do_query("INSERT INTO page_requests (type,name,weight,id) VALUES ('author',?,1,?)",$author,$fields{id})  if($author);
+        $self->{CPANSTATS}->do_query("INSERT INTO page_requests (type,name,weight,id) VALUES ('distro',?,1,?)",$fields{dist},$fields{id});
 
         my @rows = $self->{CPANSTATS}->get_query('array',$SQL{SELECT}{RELEASE},$fields{guid});
         #print STDERR "# select release $SQL{SELECT}{RELEASE},$fields{guid}\n";
@@ -796,11 +839,15 @@ sub cache_report {
     my $self = shift;
     return  unless($self->{report}{guid} && $self->{report}{metabase});
 
-    $self->{'METABASE'}->do_query('INSERT IGNORE INTO metabase (guid,id,updated,report) VALUES (?,?,?,?)',
+    # in check mode, assume the rest happens
+    return 1 if($self->{check});
+    return 1 if($self->{localonly});
+
+    $self->{METABASE}->do_query('INSERT IGNORE INTO metabase (guid,id,updated,report) VALUES (?,?,?,?)',
         $self->{report}{guid},$self->{report}{id},$self->{report}{updated},encode_json($self->{report}{metabase}));
 
     if((++$self->{meta_count} % 500) == 0) {
-        $self->{CPANSTATS}->do_commit;
+        $self->{METABASE}->do_commit;
     }
 
     return 1;
@@ -810,10 +857,14 @@ sub cache_update {
     my $self = shift;
     return  unless($self->{report}{guid} && $self->{report}{id});
 
-    $self->{'METABASE'}->do_query('UPDATE metabase SET id=? WHERE guid=?',$self->{report}{id},$self->{report}{guid});
+    # in check mode, assume the rest happens
+    return 1 if($self->{check});
+    return 1 if($self->{localonly});
+
+    $self->{METABASE}->do_query('UPDATE metabase SET id=? WHERE guid=?',$self->{report}{id},$self->{report}{guid});
 
     if((++$self->{meta_count} % 500) == 0) {
-        $self->{CPANSTATS}->do_commit;
+        $self->{METABASE}->do_commit;
     }
 
     return 1;
@@ -821,6 +872,100 @@ sub cache_update {
 
 #----------------------------------------------------------------------------
 # Private Functions
+
+sub load_uploads {
+    my $self = shift;
+
+    my @rows = $self->{CPANSTATS}->get_query('hash','SELECT dist,version,type FROM uploads');
+    for my $row (@rows) {
+        $self->{oncpan}{$row->{dist}}{$row->{version}} = $row->{type};
+    }
+}
+
+sub load_authors {
+    my $self = shift;
+
+    my @rows = $self->{CPANSTATS}->get_query('hash','SELECT author,dist,version FROM ixlatest');
+    for my $row (@rows) {
+        $self->{author}{$row->{dist}}{$row->{version}} = $row->{author};
+    }
+}
+
+sub load_perl_versions {
+    my $self = shift;
+
+    my @rows = $self->{CPANSTATS}->get_query('hash','SELECT * FROM perl_version');
+    for my $row (@rows) {
+        $self->{perls}{$row->{version}} = {
+                perl  => $row->{perl},
+		patch => $row->{patch},
+		devel => $row->{devel},
+		saved => 1
+        };
+    }
+}
+
+sub save_perl_versions {
+    my $self = shift;
+
+    for my $vers (keys %{ $self->{perls} }) {
+        next    if($self->{perls}{$vers}{saved});
+        $self->{CPANSTATS}->do_query("INSERT INTO perl_version (version,perl,patch,devel) VALUES (?,?,?,?)",
+		$vers, $self->{perls}{$vers}{perl}, $self->{perls}{$vers}{patch}, $self->{perls}{$vers}{devel});
+    }
+}
+
+sub _get_perl_version {
+    my $self = shift;
+    my $vers = shift;
+
+    unless($self->{perls}{$vers}) {
+        my $patch  = $vers =~ /^5.(7|9|[1-9][13579])/   ? 1 : 0,    # odd numbers now mark development releases
+        my $devel  = $vers =~ /(RC\d+|patch)/           ? 1 : 0,
+        my ($perl) = $vers =~ /(5\.\d+(?:\.\d+)?)/;
+
+        $self->{perls}{$vers} = {
+                perl  => $perl,
+		patch => $patch,
+		devel => $devel,
+		saved => 0
+        };
+    }
+
+    return $self->{perls}{$vers}{perl}, $self->{perls}{$vers}{patch}, $self->{perls}{$vers}{devel};
+}
+
+sub _get_guid_list {
+    my ($self,$guid,$file) = @_;
+    my (@ids,@guids);
+
+    # we're only parsing one id
+    if($guid) {
+        if($guid =~ /^\d+$/)    { push @ids,   $guid }
+        else                    { push @guids, $guid }
+    } elsif($file) {
+        my $fh = IO::File->new($file,'r')       or die "Cannot read file [$file]: $!";
+        while(<$fh>) {
+            chomp;
+            my ($num) = (m/^([\da-z-]+)/i);
+            if($guid =~ /^\d+$/)    { push @ids,   $guid }
+            else                    { push @guids, $guid }
+        }
+        $fh->close;
+    } else {
+        return;
+    }
+
+    # turn ids into guids
+    if(@ids) {
+        my @rows = $self->{CPANSTATS}->get_query('array','SELECT guid FROM cpanstats WHERE id IN ('.join(',',@ids).')');
+        push @guids, $_->[0] for(@rows);
+    }
+
+    my %guids = map {$_ => 1} @guids;
+    my @list  = keys %guids;
+    return @list;
+}
 
 sub _get_createdate {
     my ($self,$guid,$date) = @_;
@@ -867,9 +1012,9 @@ sub _get_tester {
 }
 
 sub _get_author {
-    my ($self,$dist,$version) = @_;
-    my @rows = $self->{CPANSTATS}->get_query('array','SELECT author FROM ixlatest WHERE dist=? AND version=? LIMIT 1',$dist,$version);
-    return @rows ? $rows[0]->[0] : '';
+    my ($self,$dist,$vers) = @_;
+    my $author = $self->{author}{$dist}{$vers} || '';
+    return $author;
 }
 
 sub _valid_field {
@@ -890,8 +1035,7 @@ sub _get_lastid {
 sub _oncpan {
     my ($self,$dist,$vers) = @_;
 
-    my @rows = $self->{CPANSTATS}->get_query('array','SELECT DISTINCT(type) FROM uploads WHERE dist=? AND version=?',$dist,$vers);
-    my $type = @rows ? $rows[0]->[0] : undef;
+    my $type = $self->{oncpan}{$dist}{$vers};
 
     return 1    unless($type);          # assume it's a new release
     return 0    if($type eq 'backpan'); # on backpan only
@@ -906,7 +1050,7 @@ sub _osname {
     my $uname = uc $name;
     $self->{OSNAMES}{$lname} ||= do {
         $self->{CPANSTATS}->do_query(qq{INSERT INTO osname (osname,ostitle) VALUES ('$name','$uname')});
-        $uname;
+        $lname;
     };
 
     return $self->{OSNAMES}{$lname};
@@ -950,8 +1094,8 @@ sub _platform_to_osname {
 
     return $1	if($arch =~ /($OSNAMES)/i);
 
-    for my $rx (keys %OSNAMES) {
-        return $OSNAMES{$rx} if($arch =~ /$rx/i);
+    for my $rx (keys %{ $self->{OSNAMES} }) {
+        return $self->{OSNAMES}{$rx} if($arch =~ /$rx/i);
     }
 
     return '';
@@ -1020,15 +1164,10 @@ sub _make_rss {
     );
 
     for my $test (@$data) {
+        my @fields = map {$test->{$_} || ''} qw( status dist version perl osname osvers platform );
         $rss->add_item(
-            title => sprintf(
-                "%s %s-%s %s on %s %s (%s)",
-                map {$_||''}
-                @{$test}{
-                    qw( status dist version perl osname osvers platform )
-                    }
-            ),
-            link => "$self->{reportlink}/" . ($test->{guid} || $test->{id}),
+            title => sprintf( "%s %s-%s %s on %s %s (%s)", @fields ),
+            link  => "$self->{reportlink}/" . ($test->{guid} || $test->{id}),
         );
     }
 
@@ -1040,8 +1179,10 @@ sub _log {
     my $log = $self->{logfile} or return;
     mkpath(dirname($log))   unless(-f $log);
     my $fh = IO::File->new($log,'a+') or die "Cannot append to log file [$log]: $!\n";
+    print $fh $self->{msg}	if($self->{msg});
     print $fh @_;
     $fh->close;
+    $self->{msg} = '';
 }
 
 1;
@@ -1258,9 +1399,13 @@ report as appropriate. Updates Recent JSON & RSS files.
 Given a guid, determines whether it has already been saved in the local
 metabase cache.
 
+=item * load_fact
+
+Get a specific report fact for a given GUID, from the local database.
+
 =item * get_fact
 
-Get a specific report factfor a given GUID.
+Get a specific report fact for a given GUID, from the Metabase.
 
 =item * parse_report
 
@@ -1288,6 +1433,31 @@ Inserts a serialised report into a local metabase cache database.
 
 For the current report will update the local metabase cache with the id used
 within the cpanstats database.
+
+=back
+
+=head2 Very Private methods
+
+The following modules load information enmasse to avoid DB connection hogging 
+and IO blocking. Thus improving performance.
+
+=over 4
+
+=item * load_uploads
+
+Loads the upload information.
+
+=item * load_authors
+
+Loads information regarding each author's distribution.
+
+=item * load_perl_versions
+
+Loads all the known Perl versions.
+
+=item * save_perl_versions
+
+Saves any new Perl versions
 
 =back
 
@@ -1360,8 +1530,9 @@ changes, a new name was given to the distribution.
 
 =head2 CPAN-Testers-Data-Generator
 
-  Original author:    Barbie       <barbie@cpan.org>   (C) 2008-2011
+  Original author:    Barbie       <barbie@cpan.org>   (C) 2008-2012
 
 =head1 LICENSE
 
-This code is distributed under the Artistic License 2.0.
+  This module is free software; you can redistribute it and/or
+  modify it under the Artistic License 2.0.
