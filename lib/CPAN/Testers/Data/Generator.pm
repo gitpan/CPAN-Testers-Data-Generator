@@ -4,7 +4,7 @@ use warnings;
 use strict;
 
 use vars qw($VERSION);
-$VERSION = '1.03';
+$VERSION = '1.04';
 
 #----------------------------------------------------------------------------
 # Library Modules
@@ -479,6 +479,20 @@ $self->_log("STOP REPARSE\n");
     return 1;
 }
 
+sub tail {
+    my ($self,$hash) = @_;
+    return unless($hash->{file});
+
+$self->_log("START TAIL\n");
+
+    my $guids = $self->get_tail_guids();
+    my $fh = IO::File->new($hash->{file},'a+') or die "Cannot read file [$hash->{file}]: $!";
+    print $fh "$_\n"    for(@$guids);
+    $fh->close;
+
+$self->_log("STOP TAIL\n");
+}
+
 #----------------------------------------------------------------------------
 # Private Methods
 
@@ -488,6 +502,25 @@ sub commit {
         next    unless($self->{$_});
         $self->{$_}->do_commit;
     }
+}
+
+sub get_tail_guids {
+    my $self = shift;
+    my $guids;
+
+    eval {
+        $guids = $self->{librarian}->search(
+        	'core.type'         => 'CPAN-Testers-Report',
+        	'core.update_time'  => { ">", 0 },
+        	'-desc'             => 'core.update_time',
+        	'-limit'            => $self->{poll_limit},
+    	);
+    };
+
+    $self->_log(" ... Metabase Tail Failed [$@]\n") if($@);
+    $self->_log("Retrieved ".($guids ? scalar(@$guids) : 0)." guids\n");
+
+    return $guids;
 }
 
 sub get_next_guids {
@@ -1019,8 +1052,8 @@ sub _get_guid_list {
         while(<$fh>) {
             chomp;
             my ($num) = (m/^([\da-z-]+)/i);
-            if($guid =~ /^\d+$/)    { push @ids,   $guid }
-            else                    { push @guids, $guid }
+            if($num =~ /^\d+$/) { push @ids,   $num }
+            else                { push @guids, $num }
         }
         $fh->close;
     } else {
@@ -1452,6 +1485,10 @@ In addition, as per reparse, there is the option to exclude fields from parsing
 checks, where they may be corrupted, and can be later amended using the 
 'cpanstats-update' tool.
 
+=item * tail
+
+Write to a file, the list of GUIDs returned from a tail request.
+
 =back
 
 =head2 Private Methods
@@ -1463,6 +1500,10 @@ checks, where they may be corrupted, and can be later amended using the
 To speed up the transaction process, a commit is performed every 500 inserts.
 This method is used as part of the clean up process to ensure all transactions
 are completed.
+
+=item * get_tail_guids
+
+Get the list of GUIDs as would be seen for a tail log.
 
 =item * get_next_guids
 
