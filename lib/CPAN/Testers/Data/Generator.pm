@@ -4,7 +4,7 @@ use warnings;
 use strict;
 
 use vars qw($VERSION);
-$VERSION = '1.05';
+$VERSION = '1.06';
 
 #----------------------------------------------------------------------------
 # Library Modules
@@ -20,7 +20,6 @@ use HTML::Entities;
 use IO::File;
 use JSON;
 use Time::Local;
-use XML::RSS;
 
 use Metabase    0.004;
 use Metabase::Fact;
@@ -94,14 +93,12 @@ sub new {
     }
 
     # command line swtiches override configuration settings
-    for my $key (qw(logfile poll_limit stopfile offset json_file rss_file rss_limit reportlink aws_bucket aws_namespace)) {
+    for my $key (qw(logfile poll_limit stopfile offset aws_bucket aws_namespace)) {
         $self->{$key} = $hash{$key} || $cfg->val('MAIN',$key);
     }
 
     $self->{offset}     ||= 1;
     $self->{poll_limit} ||= 1000;
-    $self->{rss_limit}  ||= 1000;
-    $self->{reportlink} ||= '';
 
     my @rows = $self->{METABASE}->get_query('hash','SELECT * FROM testers_email');
     for my $row (@rows) {
@@ -161,21 +158,14 @@ sub generate {
 
     $self->{reparse} = 0;
 
-    if($self->{json_file} && -f $self->{json_file}) {
-        my $json = read_file($self->{json_file});
-        $self->{reports} = decode_json($json);
-    }
-
 $self->_log("START GENERATE nonstop=$nonstop\n");
 
     do {
         my $start = localtime(time);
         ($self->{processed},$self->{stored},$self->{cached}) = (0,0,0);
-        my $limit = int($self->{rss_limit} / 5);
-        $limit = 500;
 
         my $guids = $self->get_next_guids();
-        $self->retrieve_reports($guids,$start,$limit);
+        $self->retrieve_reports($guids,$start);
 
         $nonstop = 0	if($self->{processed} == 0);
         $nonstop = 0	if($self->{stopfile} && -f $self->{stopfile});
@@ -589,11 +579,7 @@ sub get_next_guids {
 }
 
 sub retrieve_reports {
-    my ($self,$guids,$start,$limit) = @_;
-    $limit ||= 0;
-    my $count = 0;
-
-    my @reports = $self->{reports} ? @{ $self->{reports} } : ();
+    my ($self,$guids,$start) = @_;
 
     if($guids) {
         for my $guid (@$guids) {
@@ -608,8 +594,6 @@ sub retrieve_reports {
                 if($self->store_report()) { 
                     $self->{msg} .= ".. stored";
                     $self->{stored}++; 
-                    unshift @reports, $report;
-                    $count++;
 
                 } else {
                     if($self->{time} gt $self->{report}{updated}) {
@@ -623,19 +607,7 @@ sub retrieve_reports {
             } else {
                 $self->_log(".. FAIL\n");
             }
-
-            if($limit && $count % $limit == 0) {
-                splice(@reports,0,$self->{rss_limit})   if(scalar(@reports) > $self->{rss_limit});
-                #overwrite_file( $self->{rss_file}, $self->_make_rss( \@reports ) )      if($self->{rss_file});
-            }
         }
-    }
-
-    # store recent files
-    if($limit){
-        splice(@reports,0,$self->{rss_limit})   if(scalar(@reports) > $self->{rss_limit});
-        #overwrite_file( $self->{json_file}, $self->_make_json( \@reports ) )    if($self->{json_file});
-        #overwrite_file( $self->{rss_file},  $self->_make_rss(  \@reports ) )    if($self->{rss_file});
     }
 
     $self->commit();
@@ -1244,52 +1216,6 @@ sub _send_email {
     }
 }
 
-sub _make_json {
-    my ( $self, $data ) = @_;
-    return encode_json( $data );
-}
-
-sub _make_rss {
-    my ( $self, $data ) = @_;
-
-    my $title = "Recent CPAN Testers Reports";
-    my $link  = "http://www.cpantesters.org/static/recent.html";
-    my $desc  = "Recent CPAN Testers reports";
-
-    my @date = $data->[0]->{fulldate} =~ /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})/;
-    my $date = sprintf "%04d-%02d-%02dT%02d:%02d+01:00", @date;
-
-    my $rss = XML::RSS->new( version => '1.0' );
-    $rss->channel(
-        title       => $title,
-        link        => $link,
-        description => $desc,
-        syn         => {
-            updatePeriod    => "daily",
-            updateFrequency => "1",
-            updateBase      => "1901-01-01T00:00+00:00",
-        },
-        dc          => {
-            date            => $date,
-            subject         => $desc,
-            creator         => 'barbie@cpantesters.org',
-            publisher       => 'barbie@cpantesters.org',
-            rights          => 'Copyright ' . $date[0] . ', CPAN Testers',
-            language        => 'en-gb'
-        }
-    );
-
-    for my $test (@$data) {
-        my @fields = map {$test->{$_} || ''} qw( status dist version perl osname osvers platform );
-        $rss->add_item(
-            title => sprintf( "%s %s-%s %s on %s %s (%s)", @fields ),
-            link  => "$self->{reportlink}/" . ($test->{guid} || $test->{id}),
-        );
-    }
-
-    return $rss->as_string;
-}
-
 sub _date_diff {
     my ($date1,$date2) = @_;
 
@@ -1297,6 +1223,9 @@ sub _date_diff {
     my (@dt2) = $date2 =~ /(\d+)-(\d+)-(\d+)T(\d+):(\d+):(\d+)Z/;
 
     return -1 unless(@dt1 && @dt2);
+
+    $dt1[1]--;
+    $dt2[1]--;
 
     my $dt1 = timelocal(reverse @dt1);
     my $dt2 = timelocal(reverse @dt2);
@@ -1327,8 +1256,7 @@ CPAN::Testers::Data::Generator - Download and summarize CPAN Testers data
 
   % cpanstats
   # ... wait patiently, very patiently
-  # ... then use cpanstats.db, an SQLite database
-  # ... or the MySQL database
+  # ... then use the cpanstats MySQL database
 
 =head1 DESCRIPTION
 
@@ -1338,64 +1266,78 @@ rewritten to use the CPAN Testers Statistics database generation code. This
 now means that all the CPAN Testers sites including the Reports site, the
 Statistics site and the CPAN Dependencies site, can use the same database.
 
-This module downloads articles from the cpan-testers newsgroup, generating or
-updating an SQLite database containing all the most important information. You
-can then query this database, or use CPAN::WWW::Testers to present it over the
-web.
+This module retrieves and parses reports from the Metabase, generating or
+updating entries in the cpanstats database, which extracts specific metadata
+from the reports. The information in the cpanstats database is then presented
+via CPAN::Testers::WWW::Reports on the CPAN Testers Reports website.
 
-A good example query for Acme-Colour would be:
+A good example query from the cpanstats database for Acme-Colour would be:
 
   SELECT version, status, count(*) FROM cpanstats WHERE
-  distribution = "Acme-Colour" group by version, state;
+  dist = "Acme-Colour" group by version, state;
 
 To create a database from scratch can take several days, as there are now over
-2 million articles in the newgroup. As such updating from a known copy of the
+24 million submitted reports. As such updating from a known copy of the
 database is much more advisable. If you don't want to generate the database
-yourself, you can obtain the latest official copy (compressed with gzip) at
-http://devel.cpantesters.org/cpanstats.db.gz
+yourself, you can obtain a feed using CPAN::Testers::WWW::Report::Query::Reports.
 
-With over 6 million articles in the archive, if you do plan to run this
+With over 24 million reports in the database, if you do plan to run this
 software to generate the databases it is recommended you utilise a high-end
-processor machine. Even with a reasonable processor it can take a week!
+processor machine. Even with a reasonable processor it can take over a week!
 
-=head1 SQLite DATABASE SCHEMA
+=head1 DATABASE SCHEMA
 
 The cpanstats database schema is very straightforward, one main table with
 several index tables to speed up searches. The main table is as below:
 
-  +--------------------------------+
-  | cpanstats                      |
-  +----------+---------------------+
-  | id       | INTEGER PRIMARY KEY |
-  | state    | TEXT                |
-  | postdate | TEXT                |
-  | tester   | TEXT                |
-  | dist     | TEXT                |
-  | version  | TEXT                |
-  | platform | TEXT                |
-  | perl     | TEXT                |
-  | osname   | TEXT                |
-  | osvers   | TEXT                |
-  | date     | TEXT                |
-  | guid     | TEXT                |
-  | type     | INTEGER             |
-  +----------+---------------------+
+  CREATE TABLE `cpanstats` (
+
+    `id`          int(10) unsigned    NOT NULL AUTO_INCREMENT,
+    `guid`        char(36)            NOT NULL DEFAULT '',
+    `state`       varchar(32)         DEFAULT NULL,
+    `postdate`    varchar(8)          DEFAULT NULL,
+    `tester`      varchar(255)        DEFAULT NULL,
+    `dist`        varchar(255)        DEFAULT NULL,
+    `version`     varchar(255)        DEFAULT NULL,
+    `platform`    varchar(255)        DEFAULT NULL,
+    `perl`        varchar(255)        DEFAULT NULL,
+    `osname`      varchar(255)        DEFAULT NULL,
+    `osvers`      varchar(255)        DEFAULT NULL,
+    `fulldate`    varchar(32)         DEFAULT NULL,
+    `type`        int(2)              DEFAULT '0',
+      
+    PRIMARY KEY       (`id`),
+    KEY `guid`        (`guid`),
+    KEY `distvers`    (`dist`,`version`),
+    KEY `tester`      (`tester`),
+    KEY `state`       (`state`),
+    KEY `postdate`    (`postdate`)
+  
+  )
 
 It should be noted that 'postdate' refers to the YYYYMM formatted date, whereas
-the 'date' field refers to the YYYYMMDDhhmm formatted date and time.
+the 'fulldate' field refers to the YYYYMMDDhhmm formatted date and time.
 
 The metabase database schema is again very straightforward, and consists of one
-table, as below:
+main table, as below:
 
-  +--------------------------------+
-  | metabase                       |
-  +----------+---------------------+
-  | guid     | TEXT PRIMARY KEY    |
-  | report   | TEXT                |
-  +----------+---------------------+
+  CREATE TABLE `metabase` (
+  
+    `guid`      char(36)            NOT NULL,
+    `id`        int(10) unsigned    NOT NULL,
+    `updated`   varchar(32)         DEFAULT NULL,
+    `report`    longblob            NOT NULL,
+  
+    PRIMARY KEY     (`guid`),
+    KEY `id`        (`id`),
+    KEY `updated`   (`updated`)
+  
+  )
 
 The report field is JSON encoded, and is a cached version of the one extracted
 from Metabase::Librarian.
+
+See F<examples/cpanstats-createdb> for the full list of tables used.
 
 =head1 SIGNIFICANT CHANGES
 
@@ -1420,7 +1362,8 @@ new distribution CPAN-Testers-Common-DBUtils.
 
 In the next stage of development of CPAN Testers 2.0, the id field used within
 the database schema above for the cpanstats table no longer matches the NNTP
-ID value, although the id in the articles does still reference the NNTP ID.
+ID value, although the id in the articles does still reference the NNTP ID, at
+least for the reports submitted prior to the switch to the Metabase in 2010.
 
 In order to correctly reference the id in the articles table, you will need to
 use the function guid_to_nntp() with CPAN::Testers::Common::Utils, using the
@@ -1540,7 +1483,7 @@ cached report.
 =item * retrieve_reports
 
 Abstracted loop of requesting GUIDs, then parsing, storing and caching each 
-report as appropriate. Updates Recent JSON & RSS files.
+report as appropriate.
 
 =item * already_saved
 
@@ -1611,9 +1554,9 @@ Saves any new Perl versions
 
 =head1 HISTORY
 
-The CPAN testers was conceived back in May 1998 by Graham Barr and Chris
+The CPAN Testers was conceived back in May 1998 by Graham Barr and Chris
 Nandor as a way to provide multi-platform testing for modules. Today there
-are over 2 million tester reports and more than 100 testers each month
+are over 24 million tester reports and more than 100 testers each month
 giving valuable feedback for users and authors alike.
 
 =head1 BECOME A TESTER

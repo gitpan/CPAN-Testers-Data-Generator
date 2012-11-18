@@ -1,6 +1,6 @@
 {
     "name": "CPAN-Testers-Data-Generator",
-    "version": "1.05",
+    "version": "1.06",
     "abstract": "CPAN Testers cpanstats Database Generator",
     "author": [
         "Barbie (BARBIE) <barbie@cpan.org>"
@@ -44,8 +44,7 @@
                 "JSON": "0",
                 "Metabase": "0.014",
                 "Metabase::Fact": "0",
-                "Time::Local": "0",
-                "XML::Feed": "0"
+                "Time::Local": "0"
             }
         },
         "test" : {
@@ -64,7 +63,7 @@
     "provides": {
         "CPAN::Testers::Data::Generator": {
             "file": "lib/CPAN/Testers/Data/Generator.pm",
-            "version": "1.05"
+            "version": "1.06"
         }
     },
     "no_index": {
