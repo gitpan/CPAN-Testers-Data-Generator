@@ -1,12 +1,16 @@
 Revision history for Perl module CPAN::Testers::Data::Generator.
 
+1.07    2012-12-06
+        - updated README
+        - rewritten generate method.
+
 1.06    2012-11-18
-	- removed JSON & RSS Recent code.
-	- fixed dates.
+        - removed JSON & RSS Recent code.
+        - fixed dates.
 
 1.05    2012-11-13
-	- parse message fix.
-	- disabled SQLite updates.
+        - parse message fix.
+        - disabled SQLite updates.
         - new script:
             bin/cpanstats-sqlite                (v0.01)
         - script updates:
