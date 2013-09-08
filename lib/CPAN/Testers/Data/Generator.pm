@@ -4,7 +4,7 @@ use warnings;
 use strict;
 
 use vars qw($VERSION);
-$VERSION = '1.10';
+$VERSION = '1.11';
 
 #----------------------------------------------------------------------------
 # Library Modules
@@ -13,6 +13,7 @@ use Config::IniFiles;
 use CPAN::Testers::Common::Article;
 use CPAN::Testers::Common::DBUtils;
 #use Data::Dumper;
+use Data::FlexSerializer;
 use DateTime;
 use DateTime::Duration;
 use File::Basename;
@@ -25,6 +26,7 @@ use Time::Local;
 
 use Metabase    0.004;
 use Metabase::Fact;
+use Metabase::Resource;
 use CPAN::Testers::Fact::LegacyReport;
 use CPAN::Testers::Fact::TestSummary;
 use CPAN::Testers::Metabase::AWS;
@@ -149,6 +151,11 @@ sub new {
         return  unless($self->{metabase} && $self->{librarian});
     }
 
+    # reports are now stored in a compressed format
+    $self->{serializer} = Data::FlexSerializer->new(
+        detect_compression => 1,
+    );
+
     return $self;
 }
 
@@ -180,33 +187,6 @@ $self->_log("START GENERATE nonstop=$nonstop\n");
         my $data = $self->get_next_dates($maxdate);
     
         $self->_consume_reports( $maxdate, $data );
-
-        $nonstop = 0	if($self->{processed} == 0);
-        $nonstop = 0	if($self->{stopfile} && -f $self->{stopfile});
-
-        $self->load_uploads()	if($nonstop);
-        $self->load_authors()	if($nonstop);
-
-$self->_log("CHECK nonstop=$nonstop\n");
-    } while($nonstop);
-$self->_log("STOP GENERATE nonstop=$nonstop\n");
-}
-
-sub _generate_old {
-    my $self    = shift;
-    my $nonstop = shift || 0;
-    my @reports;
-
-    $self->{reparse} = 0;
-
-$self->_log("START GENERATE nonstop=$nonstop\n");
-
-    do {
-        my $start = localtime(time);
-        ($self->{processed},$self->{stored},$self->{cached}) = (0,0,0);
-
-        my $guids = $self->get_next_guids();
-        $self->retrieve_reports($guids,$start);
 
         $nonstop = 0	if($self->{processed} == 0);
         $nonstop = 0	if($self->{stopfile} && -f $self->{stopfile});
@@ -296,6 +276,8 @@ $self->_log("START sql=[$sql]\n");
             warn "No report returned [$row->{id},$row->{guid}]\n";
             next;
         }
+
+        $row->{report} = $self->{serializer}->deserialize($row->{report});
 
         $self->{report}{id}       = $row->{id};
         $self->{report}{guid}     = $row->{guid};
@@ -534,7 +516,7 @@ sub get_next_guids {
     my ($self,$start) = @_;
     my ($guids);
 
-    $self->_log("PRE time=[$self->{time}], last=[$self->{last}], start=[".($start||'')."]\n");
+    $self->_log("PRE time=[".($self->{time}||'')."], last=[".($self->{last}||'')."], start=[".($start||'')."]\n");
 
     if($start) {
         $self->{time} = $start;
@@ -564,7 +546,7 @@ sub get_next_guids {
         }
     }
 
-    $self->_log("START time=[$self->{time}], last=[$self->{last}]\n");
+    $self->_log("START time=[$self->{time}], last=[".($self->{last}||'')."]\n");
     $self->{last} = $self->{time};
 
     eval {
@@ -633,7 +615,8 @@ sub already_saved {
 sub load_fact {
     my ($self,$guid,$check) = @_;
     my @rows = $self->{METABASE}->get_query('array','SELECT report FROM metabase WHERE guid=?',$guid);
-    return $rows[0]->[0] if(@rows);
+
+    return $self->{serializer}->deserialize($rows[0]->[0])  if(@rows);
 
     $self->_log(" ... no report [guid=$guid]\n")    unless($check);
     return;
@@ -663,7 +646,7 @@ sub parse_report {
     my @facts = $report->facts();
     for my $fact (@facts) {
         if(ref $fact eq 'CPAN::Testers::Fact::TestSummary') {
-            $self->{report}{metabase}{'CPAN::Testers::Fact::TestSummary'} = $fact->as_struct ;
+            $self->{report}{metabase}{'CPAN::Testers::Fact::TestSummary'} = $fact->as_struct;
 
             $self->{report}{state}      = lc $fact->{content}{grade};
             $self->{report}{platform}   = $fact->{content}{archname};
@@ -936,8 +919,11 @@ sub cache_report {
     return 1 if($self->{check});
     return 1 if($self->{localonly});
 
+    my $json = encode_json($self->{report}{metabase});
+    my $data = $self->{serializer}->serialize($json);
+
     $self->{METABASE}->do_query('INSERT IGNORE INTO metabase (guid,id,updated,report) VALUES (?,?,?,?)',
-        $self->{report}{guid},$self->{report}{id},$self->{report}{updated},encode_json($self->{report}{metabase}));
+        $self->{report}{guid},$self->{report}{id},$self->{report}{updated},$data);
 
     if((++$self->{meta_count} % 500) == 0) {
         $self->{METABASE}->do_commit;

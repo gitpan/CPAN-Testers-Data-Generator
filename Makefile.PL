@@ -23,6 +23,7 @@ WriteMakefile(
         'CPAN::Testers::Fact::TestSummary'  => 0,
         'CPAN::Testers::Metabase::AWS'      => 0,
         'CPAN::Testers::Report'             => 0,
+        'Data::FlexSerializer'              => 0,
         'DateTime'                          => 0,
         'DateTime::Duration'                => 0,
         'File::Basename'                    => 0,
@@ -33,6 +34,7 @@ WriteMakefile(
         'JSON'                              => 0,
         'Metabase'                          => 0.014,
         'Metabase::Fact'                    => 0,
+        'Metabase::Resource'                => 0,
         'Time::Local'                       => 0,
 
         'DBI'                               => 0,
