@@ -4,7 +4,7 @@ use warnings;
 use strict;
 
 use vars qw($VERSION);
-$VERSION = '1.11';
+$VERSION = '1.12';
 
 #----------------------------------------------------------------------------
 # Library Modules
@@ -83,7 +83,7 @@ sub new {
     my $cfg = Config::IniFiles->new( -file => $hash{config} );
 
     # configure databases
-    for my $db (qw(CPANSTATS METABASE)) { # LITESTATS
+    for my $db (qw(CPANSTATS METABASE)) {
         die "No configuration for $db database\n"   unless($cfg->SectionExists($db));
         my %opts = map {$_ => ($cfg->val($db,$_)||undef);} qw(driver database dbfile dbhost dbport dbuser dbpass);
         $opts{AutoCommit} = 0;
@@ -153,7 +153,14 @@ sub new {
 
     # reports are now stored in a compressed format
     $self->{serializer} = Data::FlexSerializer->new(
-        detect_compression => 1,
+        detect_compression  => 1,
+        detect_json         => 1,
+        output_format       => 'json'
+    );
+    $self->{serializer2} = Data::FlexSerializer->new(
+        detect_compression  => 1,
+        detect_sereal       => 1,
+        output_format       => 'sereal'
     );
 
     return $self;
@@ -263,25 +270,26 @@ $self->_log("START REBUILD\n");
 $self->_log("START sql=[$sql]\n");
 
 #    $self->{CPANSTATS}->do_query("DELETE FROM cpanstats WHERE id >= $start AND id <= $end");
-#    $self->{LITESTATS}->do_query("DELETE FROM cpanstats WHERE id >= $start AND id <= $end");
 
     my $iterator = $self->{METABASE}->iterator('hash',$sql);
     while(my $row = $iterator->()) {
         $self->_log("GUID [$row->{guid}]");
         $self->{processed}++;
 
-        # no article for that id!
-        unless($row->{report}) {
+        if($row->{fact}) {
+            $self->{fact}   = $self->{serializer2}->deserialize($row->{fact});
+            $self->{facts}  = $self->dereference_report($self->{fact});
+        } elsif($row->{report}) {
+            $row->{facts}   = decode_json($self->{serializer}->deserialize($row->{report}));
+        } else {
             $self->_log(" ... no report\n");
             warn "No report returned [$row->{id},$row->{guid}]\n";
             next;
         }
 
-        $row->{report} = $self->{serializer}->deserialize($row->{report});
-
         $self->{report}{id}       = $row->{id};
         $self->{report}{guid}     = $row->{guid};
-        $self->{report}{metabase} = decode_json($row->{report});
+        $self->{report}{metabase} = $self->{facts};
 
         # corrupt cached report?
         if($self->reparse_report()) { # true if invalid report
@@ -374,7 +382,7 @@ $self->_log("START REPARSE\n");
         $report = $self->load_fact($guid)    unless($hash->{force});
 
         if($report) {
-            $self->{report}{metabase} = decode_json($report);
+            $self->{report}{metabase} = $report;
             $self->{report}{guid} = $guid;
             $hash->{report} = $report;
             if($self->reparse_report(%$hash)) {	# true if invalid report
@@ -438,7 +446,7 @@ $self->_log("STOP TAIL\n");
 
 sub commit {
     my $self = shift;
-    for(qw(CPANSTATS)) { # LITESTATS
+    for(qw(CPANSTATS)) {
         next    unless($self->{$_});
         $self->{$_}->do_commit;
     }
@@ -513,13 +521,14 @@ sub get_next_dates {
 }
 
 sub get_next_guids {
-    my ($self,$start) = @_;
+    my ($self,$start,$end) = @_;
     my ($guids);
 
-    $self->_log("PRE time=[".($self->{time}||'')."], last=[".($self->{last}||'')."], start=[".($start||'')."]\n");
+    $self->_log("PRE time=[".($self->{time}||'')."], last=[".($self->{last}||'')."], start=[".($start||'')."], end=[".($end||'')."]\n");
 
     if($start) {
-        $self->{time} = $start;
+        $self->{time}       = $start;
+        $self->{time_to}    = $end || '';
     } else {
         my @time = localtime(time);
         my $time = sprintf "%04d-%02d-%02dT%02d:%02d:%02dZ", $time[5]+1900,$time[4]+1,$time[3], $time[2],$time[1],$time[0];
@@ -550,12 +559,21 @@ sub get_next_guids {
     $self->{last} = $self->{time};
 
     eval {
-    	$guids = $self->{librarian}->search(
-        	'core.type'         => 'CPAN-Testers-Report',
-        	'core.update_time'  => { ">=", $self->{time} },
-        	'-asc'              => 'core.update_time',
-        	'-limit'            => $self->{poll_limit},
-    	);
+#        if($self->{time_to}) {
+#            $guids = $self->{librarian}->search(
+#                'core.type'         => 'CPAN-Testers-Report',
+#                'core.update_time'  => { -and => { [ ">=", $self->{time} ], [ "<=", $self->{time_to} ] } },
+#                '-asc'              => 'core.update_time',
+#                '-limit'            => $self->{poll_limit},
+#            );
+#        } else {
+            $guids = $self->{librarian}->search(
+                'core.type'         => 'CPAN-Testers-Report',
+                'core.update_time'  => { ">=", $self->{time} },
+                '-asc'              => 'core.update_time',
+                '-limit'            => $self->{poll_limit},
+            );
+#        }
     };
 
     $self->_log(" ... Metabase Search Failed [$@]\n") if($@);
@@ -614,9 +632,22 @@ sub already_saved {
 
 sub load_fact {
     my ($self,$guid,$check) = @_;
-    my @rows = $self->{METABASE}->get_query('array','SELECT report FROM metabase WHERE guid=?',$guid);
+    my @rows = $self->{METABASE}->get_query('hash','SELECT report,fact FROM metabase WHERE guid=?',$guid);
 
-    return $self->{serializer}->deserialize($rows[0]->[0])  if(@rows);
+    if(@rows) {
+        my $row = $rows[0];
+        
+        if($row->{fact}) {
+            $self->{fact} = $self->{serializer2}->deserialize($row->{fact});
+            $self->{facts} = $self->dereference_report($self->{fact});
+            return $self->{facts};
+        }
+        
+        if($row->{report}) {
+            $self->{facts} = $self->{serializer}->deserialize($row->{report});
+            return $self->{facts};
+        }
+    }
 
     $self->_log(" ... no report [guid=$guid]\n")    unless($check);
     return;
@@ -627,10 +658,28 @@ sub get_fact {
     my $fact;
     #print STDERR "guid=$guid\n";
     eval { $fact = $self->{librarian}->extract( $guid ) };
-    return $fact    if($fact);
+
+    if($fact) {
+        $self->{fact} = $fact;
+        return $fact;
+    }
 
     $self->_log(" ... no report [guid=$guid] [$@]\n");
     return;
+}
+
+sub dereference_report {
+    my ($self,$report) = @_;
+    my %facts;
+
+    my @facts = $report->facts();
+    for my $fact (@facts) {
+        my $name = ref $fact;
+        $facts{$name} = $fact->as_struct;
+        $facts{$name}{content} = decode_json($facts{$name}{content});
+    }
+
+    return \%facts;
 }
 
 sub parse_report {
@@ -647,6 +696,7 @@ sub parse_report {
     for my $fact (@facts) {
         if(ref $fact eq 'CPAN::Testers::Fact::TestSummary') {
             $self->{report}{metabase}{'CPAN::Testers::Fact::TestSummary'} = $fact->as_struct;
+            $self->{report}{metabase}{'CPAN::Testers::Fact::TestSummary'}{content} = decode_json($self->{report}{metabase}{'CPAN::Testers::Fact::TestSummary'}{content});
 
             $self->{report}{state}      = lc $fact->{content}{grade};
             $self->{report}{platform}   = $fact->{content}{archname};
@@ -659,6 +709,7 @@ sub parse_report {
             my $dist                    = Metabase::Resource->new( $fact->resource );
             $self->{report}{dist}       = $dist->metadata->{dist_name};
             $self->{report}{version}    = $dist->metadata->{dist_version};
+            $self->{report}{resource}   = $dist->metadata->{resource};
 
             # some distros are a pain!
 	    	if($self->{report}{version} eq '' && $MAPPINGS{$self->{report}{dist}}) {
@@ -679,6 +730,7 @@ sub parse_report {
 
         } elsif(ref $fact eq 'CPAN::Testers::Fact::LegacyReport') {
             $self->{report}{metabase}{'CPAN::Testers::Fact::LegacyReport'} = $fact->as_struct;
+            $self->{report}{metabase}{'CPAN::Testers::Fact::LegacyReport'}{content} = decode_json($self->{report}{metabase}{'CPAN::Testers::Fact::LegacyReport'}{content});
             $invalid = 'missing textreport' if(length $fact->{content}{textreport} < 10);   # what is the smallest report?
 
             $self->{report}{perl}       = $fact->{content}{perl_version};
@@ -704,12 +756,15 @@ sub parse_report {
         $self->{report}{fulldate}   = sprintf "%04d%02d%02d%02d%02d", $created[5]+1900, $created[4]+1, $created[3], $created[2], $created[1];
     }
 
-$self->{msg} .= ".. time [$self->{report}{created}][$self->{report}{updated}]";
+    $self->{msg} .= ".. time [$self->{report}{created}][$self->{report}{updated}]";
 
     $self->{report}{type}       = 2;
     if($self->{DISABLE} && $self->{DISABLE}{$self->{report}{from}}) {
         $self->{report}{state} .= ':invalid';
         $self->{report}{type}   = 3;
+    } elsif($self->{report}{response} && $self->{report}{response} =~ m!/perl6/!) {
+#        $self->{report}{type}   = 6;
+        return 1;
     }
 
     #print STDERR "\n====\nreport=".Dumper($self->{report});
@@ -742,6 +797,7 @@ sub reparse_report {
     my $dist                    = Metabase::Resource->new( $report->{metadata}{core}{resource} );
     $self->{report}{dist}       = $dist->metadata->{dist_name};
     $self->{report}{version}    = $dist->metadata->{dist_version};
+    $self->{report}{resource}   = $dist->metadata->{resource};
 
     $self->{report}{from}       = $self->_get_tester( $report->{metadata}{core}{creator}{resource} );
 
@@ -759,6 +815,9 @@ sub reparse_report {
     if($self->{DISABLE} && $self->{DISABLE}{$self->{report}{from}}) {
         $self->{report}{state} .= ':invalid';
         $self->{report}{type}   = 3;
+    } elsif($self->{report}{response} && $self->{report}{response} =~ m!/perl6/!) {
+#        $self->{report}{type}   = 6;
+        return 1;
     }
 
     return 1  unless($self->_valid_field($guid, 'dist'     => $self->{report}{dist})     || ($options && $options->{exclude}{dist}));
@@ -795,20 +854,14 @@ sub store_report {
     my %SQL = (
         'SELECT' => {
             CPANSTATS => 'SELECT id FROM cpanstats WHERE guid=?',
-            LITESTATS => 'SELECT id FROM cpanstats WHERE guid=?',
             RELEASE   => 'SELECT id FROM release_data WHERE guid=?',
         },
         'INSERT' => {
             CPANSTATS => 'INSERT INTO cpanstats (guid,state,postdate,tester,dist,version,platform,perl,osname,osvers,fulldate,type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
-            LITESTATS => 'INSERT INTO cpanstats (id,guid,state,postdate,tester,dist,version,platform,perl,osname,osvers,fulldate,type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
             RELEASE   => 'INSERT INTO release_data (id,guid,dist,version,oncpan,distmat,perlmat,patched,pass,fail,na,unknown) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
-        },
-        'REPLACE' => {
-            LITESTATS => 'REPLACE INTO cpanstats (id,guid,state,postdate,tester,dist,version,platform,perl,osname,osvers,fulldate,type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
         },
         'UPDATE' => {
             CPANSTATS => 'UPDATE cpanstats SET state=?,postdate=?,tester=?,dist=?,version=?,platform=?,perl=?,osname=?,osvers=?,fulldate=?,type=? WHERE guid=?',
-            LITESTATS => 'UPDATE cpanstats SET state=?,postdate=?,tester=?,dist=?,version=?,platform=?,perl=?,osname=?,osvers=?,fulldate=?,type=? WHERE guid=?',
             RELEASE   => 'UPDATE release_data SET id=?,dist=?,version=?,oncpan=?,distmat=?,perlmat=?,patched=?,pass=?,fail=?,na=?,unknown=? WHERE guid=?',
         },
     );
@@ -838,23 +891,10 @@ sub store_report {
     # in check mode, assume the rest happens
     return 1 if($self->{check});
 
-    # update the sqlite database
-#    $self->{LITESTATS}->do_query($SQL{REPLACE}{LITESTATS},$self->{report}{id},@values);
-
-#    @rows = $self->{LITESTATS}->get_query('array',$SQL{SELECT}{LITESTATS},$values[0]);
-#    if(@rows) {
-#        if($self->{reparse}) {
-#            my ($guid,@update) = @values;
-#            $self->{LITESTATS}->do_query($SQL{UPDATE}{LITESTATS},@update,$guid);
-#        }
-#    } else {
-#        $self->{LITESTATS}->do_query($SQL{INSERT}{LITESTATS},$self->{report}{id},@values);
-#    }
-
     # perl version components
     my ($perl,$patch,$devel) = $self->_get_perl_version($fields{perl});
 
-    # only valid reports
+    # only valid perl5 reports
     if($self->{report}{type} == 2) {
         $fields{id} =  $self->{report}{id};
 
@@ -913,17 +953,24 @@ sub store_report {
 
 sub cache_report {
     my $self = shift;
-    return  unless($self->{report}{guid} && $self->{report}{metabase});
+    return 0 unless($self->{report}{guid} && $self->{report}{metabase});
 
     # in check mode, assume the rest happens
     return 1 if($self->{check});
     return 1 if($self->{localonly});
 
-    my $json = encode_json($self->{report}{metabase});
-    my $data = $self->{serializer}->serialize($json);
+    my ($json,$data,$fact);
 
-    $self->{METABASE}->do_query('INSERT IGNORE INTO metabase (guid,id,updated,report) VALUES (?,?,?,?)',
-        $self->{report}{guid},$self->{report}{id},$self->{report}{updated},$data);
+    eval { $json = encode_json($self->{report}{metabase}); };
+    eval { $data = $self->{serializer}->serialize("$json"); };
+    eval { $data = $self->{serializer}->serialize( $self->{report}{metabase} ); }   if($@);
+    eval { $fact = $self->{serializer2}->serialize($self->{fact}); };
+
+    $data ||= '';
+    $fact ||= '';
+
+    $self->{METABASE}->do_query('INSERT IGNORE INTO metabase (guid,id,updated,report,fact) VALUES (?,?,?,?,?)',
+        $self->{report}{guid},$self->{report}{id},$self->{report}{updated},$data,$fact);
 
     if((++$self->{meta_count} % 500) == 0) {
         $self->{METABASE}->do_commit;
@@ -934,7 +981,7 @@ sub cache_report {
 
 sub cache_update {
     my $self = shift;
-    return  unless($self->{report}{guid} && $self->{report}{id});
+    return 0 unless($self->{report}{guid} && $self->{report}{id});
 
     # in check mode, assume the rest happens
     return 1 if($self->{check});
@@ -1036,7 +1083,7 @@ sub _consume_reports {
             $self->_log("UPDATE: update=$update, end=$end\n");
 
             # get list of guids from last update date
-            my $guids = $self->get_next_guids($update);
+            my $guids = $self->get_next_guids($update,$end);
             last    unless($guids);
 
             @guids = grep { !$guids{$_} } @$guids;
@@ -1412,6 +1459,7 @@ main table, as below:
     `id`        int(10) unsigned    NOT NULL,
     `updated`   varchar(32)         DEFAULT NULL,
     `report`    longblob            NOT NULL,
+    `fact`      longblob            NOT NULL,
   
     PRIMARY KEY     (`guid`),
     KEY `id`        (`id`),
@@ -1419,8 +1467,12 @@ main table, as below:
   
   )
 
-The report field is JSON encoded, and is a cached version of the one extracted
-from Metabase::Librarian.
+The id field is a reference to the cpanstats.id field.
+
+The report field is JSON encoded, and is a cached version of the facts of a 
+report, while the fact field is the full report fact, and associated child 
+facts, Sereal encoded. Both are extracted from the returned fact from
+Metabase::Librarian.
 
 See F<examples/cpanstats-createdb> for the full list of tables used.
 
@@ -1497,14 +1549,13 @@ to define the database access and general operation settings.
 
 Starting from the last cached report, retrieves all the more recent reports
 from the Metabase Report Submission server, parsing each and recording each
-report in both the cpanstats databases (MySQL & SQLite) and the metabase cache
-database.
+report in both the cpanstats database and the metabase cache database.
 
 =item * regenerate
 
 For a given date range, retrieves all the reports from the Metabase Report 
 Submission server, parsing each and recording each report in both the cpanstats
-databases (MySQL & SQLite) and the metabase cache database.
+database and the metabase cache database.
 
 Note that as only 2500 can be returned at any one time due to Amazon SimpleDB
 restrictions, this method will only process the guids returned from a given
@@ -1587,6 +1638,12 @@ Get a specific report fact for a given GUID, from the local database.
 
 Get a specific report fact for a given GUID, from the Metabase.
 
+=item * dereference_report
+
+When you retrieve the parent report fact from the database, you'll need to 
+dereference it to ensure the child elements contain the child facts in the
+correct format for processing.
+
 =item * parse_report
 
 Parses a report extracting the metadata required for the cpanstats database.
@@ -1645,7 +1702,7 @@ Saves any new Perl versions
 
 The CPAN Testers was conceived back in May 1998 by Graham Barr and Chris
 Nandor as a way to provide multi-platform testing for modules. Today there
-are over 24 million tester reports and more than 100 testers each month
+are over 40 million tester reports and more than 100 testers each month
 giving valuable feedback for users and authors alike.
 
 =head1 BECOME A TESTER
@@ -1710,7 +1767,7 @@ changes, a new name was given to the distribution.
 
 =head2 CPAN-Testers-Data-Generator
 
-  Original author:    Barbie       <barbie@cpan.org>   (C) 2008-2013
+  Original author:    Barbie       <barbie@cpan.org>   (C) 2008-2014
 
 =head1 LICENSE
 
