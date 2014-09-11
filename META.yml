@@ -1,6 +1,6 @@
 --- #YAML:1.0
 name:                     CPAN-Testers-Data-Generator
-version:                  1.16
+version:                  1.17
 abstract:                 CPAN Testers cpanstats Database Generator
 author:
   - Barbie <barbie@cpan.org>
@@ -48,7 +48,7 @@ build_requires:
 provides:
   CPAN::Testers::Data::Generator:
     file:     lib/CPAN/Testers/Data/Generator.pm
-    version:  1.16
+    version:  1.17
 
 no_index:
   directory:
@@ -64,4 +64,4 @@ resources:
 meta-spec:
    version:   1.4
    url:       http://module-build.sourceforge.net/META-spec-v1.4.html
-generated_by: Hand 1.0
+generated_by: The Hand of Barbie 1.0
